@@ -1,0 +1,3 @@
+cd D:\gitwork\NeuS
+D:
+conda activate neus
