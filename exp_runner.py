@@ -13,7 +13,7 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset_json import Dataset
+from models.dataset import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 
@@ -21,7 +21,6 @@ from models.renderer import NeuSRenderer
 def calc_new_pose(setting_path):
     # TODO: read pose and movement from one json file and calc new pose
     # returns new camera pose calculated by that json file
-    all_json_data  ={}
     with open(setting_path, "r") as json_file:
         all_json_data = json.load(json_file)
 
@@ -428,6 +427,14 @@ class Runner:
 
         writer.release()
 
+    def save_render_pic_at(self, setting_json_path):
+        camera_pose = calc_new_pose(args.render_at_pose_path)
+        img = self.render_novel_image_at(camera_pose, 1)
+        set_dir, case_name = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
+        render_path = set_dir + case_name + ".png"
+        cv.imwrite(render_path, img)
+        return
+
 
 if __name__ == '__main__':
     print('Hello Wooden')
@@ -456,8 +463,7 @@ if __name__ == '__main__':
     elif args.mode == 'validate_mesh':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
     elif args.mode == 'render_at':
-        camera_pose = calc_new_pose(args.render_at_pose_path)
-        runner.render_novel_image_at(camera_pose, 1)
+        runner.save_render_pic_at(args.render_at_pose_path)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
@@ -469,6 +475,7 @@ if __name__ == '__main__':
 conda activate neus
 cd D:/gitwork/NeuS
 D:
+python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
 python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
 python exp_runner.py --mode train --conf ./confs/womask_js_bk.conf --case r_bk --is_continue
