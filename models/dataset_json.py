@@ -1,6 +1,9 @@
 import json
+
+import cv2
 import torch
 import torch.nn.functional as F
+import random
 import cv2 as cv
 import numpy as np
 import os
@@ -15,12 +18,13 @@ def load_K_Rt_from_P(camera_matrix_map, camera_name):
     K_name = camera_name + "_K"
     M = camera_matrix_map[M_name]
     K = camera_matrix_map[K_name]
-    
+
     pose = np.array(M)
     intrinsics = np.eye(4)
     intrinsics[:3, :3] = K
-# M as pose(C2W), K as intrinsics
+    # M as pose(C2W), K as intrinsics
     return pose, intrinsics
+
 
 
 class Dataset:
@@ -58,6 +62,7 @@ class Dataset:
         self.frame_count = conf.get_int('frame_count')
         self.camera_count = conf.get_int('camera_count')
         self.json_type = conf.get_string('json_type')
+
         print(self.frame_count)
         print(self.camera_count)
         for frame_id in range(1, self.frame_count + 1):
@@ -83,7 +88,7 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([0.3, 0.3, 0])
+        object_bbox_min = np.array([0.0, 0.0, -0.1])
         object_bbox_max = np.array([0.8, 0.8, 0.4])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
@@ -105,6 +110,33 @@ class Dataset:
         rays_o = self.pose_all[img_idx, None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
+    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
+        l = resolution_level
+        tx = torch.linspace(0, self.W - 1, self.W // l)
+        ty = torch.linspace(0, self.H - 1, self.H // l)
+        pixels_x, pixels_y = torch.meshgrid(tx, ty)
+        p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1)  # W, H, 3
+        # we assume that the fx fy in all intrinsic mats are the same, so use the first intrinsics_all_inv to gen rays
+        p = torch.matmul(self.intrinsics_all_inv[0, None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
+        rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
+        rays_v = torch.matmul(transform_matrix[None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
+        rays_o = transform_matrix[None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
+        return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3
+
+    def gen_rays_at_pose(self, rotation, transition, resolution_level=1):
+        rotation_mat, _ = cv2.Rodrigues(rotation)
+        transform_matrix = np.zeros((4, 4))
+        transform_matrix[0:3, 0:3] = rotation_mat
+        transform_matrix[0:3, [3]] = transition
+        return self.gen_rays_at_pose_mat(transform_matrix, resolution_level)
+
+    def gen_rays_at_pose_and_change(self, transform_matrix, moving_mat, resolution_level=1):
+        #  moving mat refers a moving rigid body's current position to original, use its inv
+        mov_inv = np.linalg.inv(moving_mat)
+        after_tran = mov_inv @ transform_matrix
+
+        return self.gen_rays_at_pose_mat(after_tran, resolution_level)
+
     def gen_random_rays_at(self, img_idx, batch_size):
         """
         Generate random rays at world space from one camera.
@@ -118,7 +150,43 @@ class Dataset:
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # batch_size, 3
         rays_v = torch.matmul(self.pose_all[img_idx, None, :3, :3], rays_v[:, :, None]).squeeze()  # batch_size, 3
         rays_o = self.pose_all[img_idx, None, :3, 3].expand(rays_v.shape)  # batch_size, 3
-        return torch.cat([rays_o.to(self.device), rays_v.to(self.device), color, mask[:, :1]], dim=-1).cuda()  # batch_size, 10
+        return torch.cat([rays_o.to(self.device), rays_v.to(self.device), color, mask[:, :1]],
+                         dim=-1).cuda()  # batch_size, 10
+
+    def gen_random_rays_within_mask(self, img_idx, batch_size):
+        """
+        Generate random rays at world space from one camera within the mask, this function assumes that mask has been defined
+        be cautious that image samples as (y,x)!
+        """
+        outer_count = int(batch_size * 0.1)
+        inner_count = int(batch_size - outer_count)
+        mask_cpu = self.masks[img_idx].cpu()
+        fg_index = np.where(mask_cpu > 0.9)  # foreground & background
+        fg_yx = np.stack(fg_index, axis=1)  # n x 2
+        fg_num = fg_yx.shape[0]
+        bg_index = np.where(mask_cpu < 0.1)
+        bg_yx = np.stack(bg_index, axis=1)
+        bg_num = bg_yx.shape[0]
+        if inner_count > fg_num:
+            inner_count = fg_num
+            outer_count = batch_size - inner_count
+        fg_index = np.random.choice(range(fg_num), inner_count)
+        bg_index = np.random.choice(range(bg_num), outer_count)
+        # import pdb
+        # pdb.set_trace()
+        pixels_x = np.concatenate((fg_yx[fg_index, 1], bg_yx[bg_index, 1]))
+        pixels_y = np.concatenate((fg_yx[fg_index, 0], bg_yx[bg_index, 0]))
+        pixels_x, pixels_y = torch.from_numpy(pixels_x), torch.from_numpy(pixels_y)
+        pixels_x, pixels_y = pixels_x.to(self.device), pixels_y.to(self.device)
+        color = self.images[img_idx][(pixels_y, pixels_x)]  # batch_size, 3
+        mask = self.masks[img_idx][(pixels_y, pixels_x)]  # batch_size, 3
+        p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1).float()  # batch_size, 3
+        p = torch.matmul(self.intrinsics_all_inv[img_idx, None, :3, :3], p[:, :, None]).squeeze()  # batch_size, 3
+        rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # batch_size, 3
+        rays_v = torch.matmul(self.pose_all[img_idx, None, :3, :3], rays_v[:, :, None]).squeeze()  # batch_size, 3
+        rays_o = self.pose_all[img_idx, None, :3, 3].expand(rays_v.shape)  # batch_size, 3
+        return torch.cat([rays_o.to(self.device), rays_v.to(self.device), color, mask[:, :1]],
+                         dim=-1).cuda()  # batch_size, 10
 
     def gen_rays_between(self, idx_0, idx_1, ratio, resolution_level=1):
         """
@@ -166,5 +234,3 @@ class Dataset:
     def image_at(self, idx, resolution_level):
         img = cv.imread(self.images_lis[idx])
         return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))).clip(0, 255)
-
-
