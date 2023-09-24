@@ -16,6 +16,9 @@ from models.dataset_json import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 
+def calc_ner_pose():
+    ### TTODO: read pose and movement from one json file and calc new pose
+
 
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False):
@@ -328,6 +331,34 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
 
+
+    def render_novel_image_at(self, pose_index, resolution_level):
+
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
+        H, W, _ = rays_o.shape
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+
+        out_rgb_fine = []
+        for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
+            near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
+            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+
+            render_out = self.renderer.render(rays_o_batch,
+                                              rays_d_batch,
+                                              near,
+                                              far,
+                                              cos_anneal_ratio=self.get_cos_anneal_ratio(),
+                                              background_rgb=background_rgb)
+
+            out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
+
+            del render_out
+
+        img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
+        return img_fine
+
+
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
@@ -385,6 +416,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/base.conf')
     parser.add_argument('--mode', type=str, default='train')
+    parser.add_argument('--render_at_pose_index', type=int, default=0)
+    parser.add_argument('--render_at_movement_index', type=int, default=0)
     parser.add_argument('--mcube_threshold', type=float, default=0.0)
     parser.add_argument('--is_continue', default=False, action="store_true")
     parser.add_argument('--gpu', type=int, default=0)
@@ -399,11 +432,15 @@ if __name__ == '__main__':
         runner.train()
     elif args.mode == 'validate_mesh':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
+    elif args.mode == 'render_at':
+        camera_pose = calc_new_pose(args.render_at_pose_index ,args.render_at_movement_index)
+        runner.render_novel_image_at(camera_pose, 1)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
+
 
 #  example cmd in rebuilding:
 """
@@ -423,7 +460,9 @@ python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --cas
 python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_high_res
 python exp_runner.py --mode train --conf ./confs/womask_blender_high_res.conf --case blender_high_res
 
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object 
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle 
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object2 
+
 
 """
