@@ -160,6 +160,38 @@ class Dataset:
         rays_o = trans[None, None, :3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
+    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
+        transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32))
+        transform_matrix = transform_matrix.cuda()  # add to cuda
+        l = resolution_level
+        tx = torch.linspace(0, self.W - 1, self.W // l)
+        ty = torch.linspace(0, self.H - 1, self.H // l)
+        pixels_x, pixels_y = torch.meshgrid(tx, ty)
+        p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1)  # W, H, 3
+        # we assume that the fx fy in all intrinsic mats are the same, so use the first intrinsics_all_inv to gen rays
+        p = torch.matmul(self.intrinsics_all_inv[0, None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
+        rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
+        # import pdb
+        # pdb.set_trace()
+        rays_v = torch.matmul(transform_matrix[None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
+        rays_o = transform_matrix[None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
+        return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3
+
+    def gen_rays_at_pose(self, rotation, transition, resolution_level=1):
+        rotation_mat, _ = cv.Rodrigues(rotation)
+        transform_matrix = np.zeros((4, 4))
+        transform_matrix[0:3, 0:3] = rotation_mat
+        transform_matrix[0:3, [3]] = transition
+        transform_matrix = torch.from_numpy(transform_matrix)
+        return self.gen_rays_at_pose_mat(transform_matrix.cuda(), resolution_level)
+
+    def gen_rays_at_pose_and_change(self, transform_matrix, moving_mat, resolution_level=1):
+        #  moving mat refers a moving rigid body's current position to original, use its inv
+        mov_inv = np.linalg.inv(moving_mat)
+        after_tran = mov_inv @ transform_matrix
+
+        return self.gen_rays_at_pose_mat(after_tran, resolution_level)
+
     def near_far_from_sphere(self, rays_o, rays_d):
         a = torch.sum(rays_d**2, dim=-1, keepdim=True)
         b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)

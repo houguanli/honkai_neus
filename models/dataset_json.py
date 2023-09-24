@@ -111,6 +111,8 @@ class Dataset:
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
     def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
+        transform_matrix = torch.from_numpy(transform_matrix)
+        transform_matrix.cuda()   # add to cuda
         l = resolution_level
         tx = torch.linspace(0, self.W - 1, self.W // l)
         ty = torch.linspace(0, self.H - 1, self.H // l)
@@ -128,6 +130,9 @@ class Dataset:
         transform_matrix = np.zeros((4, 4))
         transform_matrix[0:3, 0:3] = rotation_mat
         transform_matrix[0:3, [3]] = transition
+        transform_matrix = torch.from_numpy(transform_matrix)
+        transform_matrix.cuda()   # add to cuda
+
         return self.gen_rays_at_pose_mat(transform_matrix, resolution_level)
 
     def gen_rays_at_pose_and_change(self, transform_matrix, moving_mat, resolution_level=1):

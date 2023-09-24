@@ -24,11 +24,8 @@ def calc_new_pose(setting_path):
     with open(setting_path, "r") as json_file:
         all_json_data = json.load(json_file)
 
-    q, t, original_mat = None, None, None
-    for item in all_json_data:
-        if item['frame'] == 0:
-            q, t, original_mat = item['translation'], item['rotation'], item["1_1_M"]
-            break
+    # q, t, original_mat = None, None, None
+    t, q, original_mat = all_json_data['translation'], all_json_data['rotation'], all_json_data["1_1_M"]
     if q is None:
         print("error at reading setting " + setting_path)
         exit(-1)
@@ -116,7 +113,6 @@ class Runner:
                     model_list.append(model_name)
             model_list.sort()
             latest_model_name = model_list[-1]
-
         if latest_model_name is not None:
             logging.info('Find checkpoint: {}'.format(latest_model_name))
             self.load_checkpoint(latest_model_name)
@@ -357,7 +353,7 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
 
-    def render_novel_image_at(self, pose_index, resolution_level):
+    def render_novel_image_at(self, camera_pose, resolution_level):
 
         rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
@@ -428,10 +424,14 @@ class Runner:
         writer.release()
 
     def save_render_pic_at(self, setting_json_path):
+
         camera_pose = calc_new_pose(args.render_at_pose_path)
-        img = self.render_novel_image_at(camera_pose, 1)
-        set_dir, case_name = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
-        render_path = set_dir + case_name + ".png"
+        img = self.render_novel_image_at(camera_pose, 2)
+        set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
+        file_name_with_extension = os.path.basename(setting_json_path)
+        case_name, file_extension = os.path.splitext(file_name_with_extension)
+        render_path = set_dir + "/" + case_name + ".png"
+        print("Saving render img at " + render_path)
         cv.imwrite(render_path, img)
         return
 
@@ -475,6 +475,7 @@ if __name__ == '__main__':
 conda activate neus
 cd D:/gitwork/NeuS
 D:
+python exp_runner.py --mode render_at --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/NeuS/dynamic_test/test_render.json
 python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
 python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
