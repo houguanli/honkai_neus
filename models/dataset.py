@@ -23,11 +23,9 @@ def load_K_Rt_from_P(filename, P=None):
     R = out[1]
     t = out[2]
 
-    K = K / K[2, 2]
+    K = K / K[2, 2]  # normalize
     intrinsics = np.eye(4)
     intrinsics[:3, :3] = K
-
-
     pose = np.eye(4, dtype=np.float32)
     pose[:3, :3] = R.transpose()
     pose[:3, 3] = (t[:3] / t[3])[:, 0]
@@ -88,6 +86,8 @@ class Dataset:
 
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
+        # object_bbox_min = object_bbox_min * 10
+        # object_bbox_max = object_bbox_max * 10
         # Object scale mat: region of interest to **extract mesh**
         object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]

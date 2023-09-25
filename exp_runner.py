@@ -40,8 +40,47 @@ def calc_new_pose(setting_path):
     transform_matrix[0:3, 0:3] = rotate_mat
     transform_matrix[0:3, 3] = t
     transform_matrix[3, 3] = 1.0
+    res_mat = transform_matrix @ original_mat
+    # print("calc new mat at \n" + str(res_mat))
+    return res_mat
 
-    return transform_matrix @ original_mat
+
+def calc_new_poses(setting_path):
+    # TODO: read pose and movement from one json file and calc new poses
+    # this function returns multi changed poses, so it requires frame id
+    # returns new camera pose calculated by that json file
+    # set the data structure as following:
+    # {“frame_count" : total_count, "translation_index": i_th frame translation, "rotation_index" & camera_pose are same
+    # e.g for 3rd frame: "translation_index_3": 3 floats, "rotation_index_3" : 4 floats, "camera_pose_3" : 4*4 mat
+    # important to remember the index starts from 1!
+    with open(setting_path, "r") as json_file:
+        all_json_data = json.load(json_file)
+
+    # q, t, original_mat = None, None, None
+    frame_count = all_json_data["frame_count"]
+    tran_poses = []  # new camera pose after movement
+
+    for i in range(1, frame_count + 1):
+
+        t, q, original_mat = all_json_data['translation_' + str(i)], all_json_data['rotation_' + str(i)], all_json_data[
+            "camera_pose_" + str(i)]
+        if q is None:
+            print("error at reading setting " + setting_path)
+            exit(-1)
+
+        w, x, y, z = q
+        rotate_mat = np.array([
+            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
+        ])
+        transform_matrix = np.zeros((4, 4))
+        transform_matrix[0:3, 0:3] = rotate_mat
+        transform_matrix[0:3, 3] = t
+        transform_matrix[3, 3] = 1.0
+        tran_poses.append(transform_matrix @ original_mat)
+
+    return tran_poses
 
 
 class Runner:
@@ -426,13 +465,35 @@ class Runner:
     def save_render_pic_at(self, setting_json_path):
 
         camera_pose = calc_new_pose(args.render_at_pose_path)
-        img = self.render_novel_image_at(camera_pose, 2)
+        img = self.render_novel_image_at(camera_pose, 10)
         set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
         file_name_with_extension = os.path.basename(setting_json_path)
         case_name, file_extension = os.path.splitext(file_name_with_extension)
         render_path = set_dir + "/" + case_name + ".png"
         print("Saving render img at " + render_path)
         cv.imwrite(render_path, img)
+
+        # save rays temply here
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
+        dict_, index, cl_count = [], 0, 0
+        for cls in rays_o:
+            index = 0
+            dls = rays_d[cl_count]
+            for oi in cls:
+                di = dls[index]
+                dict_.append(oi.tolist())
+                dict_.append(di.tolist())
+                index = index + 1
+            cl_count = cl_count + 1
+
+        ra_path = set_dir + "/" + case_name + ".txt"
+        print("Saving ray with count " + str(cl_count * index))
+
+        with open(ra_path, 'w') as f:
+            for vector in dict_:
+                # 将向量转换为字符串，并写入到文件中
+                f.write(str(vector) + '\n')
+        # finish tmp_saving
         return
 
 
