@@ -13,7 +13,7 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset import Dataset
+from models.dataset_json import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 
@@ -80,7 +80,7 @@ def calc_new_poses(setting_path):
         transform_matrix[3, 3] = 1.0
         tran_poses.append(transform_matrix @ original_mat)
 
-    return tran_poses
+    return  tran_poses, frame_count
 
 
 class Runner:
@@ -167,9 +167,9 @@ class Runner:
         image_perm = self.get_image_perm()
 
         for iter_i in tqdm(range(res_step)):
-            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-
-            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            # data = self.dataset.select_random_rays_in_masks(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            rays_o, rays_d, true_rgb, mask = self.dataset.select_random_rays_in_masks(image_perm[self.iter_step % len(image_perm)], self.batch_size)
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
             background_rgb = None
             if self.use_white_bkgd:
@@ -184,23 +184,18 @@ class Runner:
             render_out = self.renderer.render(rays_o, rays_d, near, far,
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
-
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
             gradient_error = render_out['gradient_error']
             weight_max = render_out['weight_max']
             weight_sum = render_out['weight_sum']
-
             # Loss
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
             psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb) ** 2 * mask).sum() / (mask_sum * 3.0)).sqrt())
-
             eikonal_loss = gradient_error
-
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
-
             loss = color_fine_loss + \
                    eikonal_loss * self.igr_weight + \
                    mask_loss * self.mask_weight
@@ -299,30 +294,34 @@ class Runner:
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
-
+        debug_flag = False
+        if idx == 114:  # for debug
+            print("val idx = 0 rays")
+            debug_flag = True
+            idx = 0
         print('Validate: iter: {}, camera: {}'.format(self.iter_step, idx))
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
         rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
-        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
-        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
-
+        if debug_flag:  # for debug
+            print("val idx = 0 rays")
+            idx = 0
+            import pdb
+            pdb.set_trace()
+        rays_o, rays_d = rays_d.reshape(-1, 3).split(self.batch_size), rays_o.reshape(-1, 3).split(self.batch_size)
         out_rgb_fine = []
         out_normal_fine = []
-
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
             background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
-
             render_out = self.renderer.render(rays_o_batch,
                                               rays_d_batch,
                                               near,
                                               far,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
-
             def feasible(key):
                 return (key in render_out) and (render_out[key] is not None)
 
@@ -496,6 +495,41 @@ class Runner:
         # finish tmp_saving
         return
 
+    def save_render_pics_at(self, setting_json_path):
+
+        camera_poses, count = calc_new_poses(args.render_at_pose_path)
+        for i in range(1, count + 1):
+            camera_pose = camera_poses[i - 1]  # get the pose
+            img = self.render_novel_image_at(camera_pose, 10)
+            set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
+            file_name_with_extension = os.path.basename(setting_json_path)
+            case_name, file_extension = os.path.splitext(file_name_with_extension)
+            render_path = set_dir + "/" + case_name + str(i) + ".png"
+            print("Saving render img at " + render_path)
+            cv.imwrite(render_path, img)
+
+            # save rays temply here
+            rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
+            dict_, index, cl_count = [], 0, 0
+            for cls in rays_o:
+                index = 0
+                dls = rays_d[cl_count]
+                for oi in cls:
+                    di = dls[index]
+                    dict_.append(oi.tolist())
+                    dict_.append(di.tolist())
+                    index = index + 1
+                cl_count = cl_count + 1
+
+            ra_path = set_dir + "/" + case_name + ".txt"
+            # print("Saving ray with count " + str(cl_count * index))
+            with open(ra_path, 'w') as f:
+                for vector in dict_:
+                    # 将向量转换为字符串，并写入到文件中
+                    f.write(str(vector) + '\n')
+        # finish tmp_saving
+        return
+
 
 if __name__ == '__main__':
     print('Hello Wooden')
@@ -525,11 +559,18 @@ if __name__ == '__main__':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
     elif args.mode == 'render_at':
         runner.save_render_pic_at(args.render_at_pose_path)
+    elif args.mode == 'render_at_s':
+        runner.save_render_pics_at(args.render_at_pose_path)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
+    elif args.mode.startswith('debug'):  # Interpolate views given two image indices
+        runner.validate_image(idx=114)
+    elif args.mode.startswith('debug__'):  # Interpolate views given two image indices
+        runner.dataset.select_random_rays_in_masks(img_idx=0, batch_size=512)
+
 
 #  example cmd in rebuilding:
 """
@@ -538,6 +579,8 @@ cd D:/gitwork/NeuS
 D:
 python exp_runner.py --mode render_at --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/NeuS/dynamic_test/test_render.json
 python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
+python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
+
 python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
 python exp_runner.py --mode train --conf ./confs/womask_js_bk.conf --case r_bk --is_continue
@@ -554,6 +597,10 @@ python exp_runner.py --mode train --conf ./confs/womask_blender_high_res.conf --
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object2 
+
+python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
+
+
 
 
 """
