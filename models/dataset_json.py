@@ -121,6 +121,7 @@ class Dataset:
 
                 rays_o, rays_v, rays_color = rays_o[rays_mask].reshape(-1, 3), rays_v[rays_mask].reshape(-1, 3), \
                     rays_color[rays_mask].reshape(-1, 3)  # H*W{mask), 3
+                print("hold " + str(rays_o.shape[0]) + "rays for image " + str(index + 1) )
                 if len(rays_o) > max_rays_in_gpu:
                     # hold as a random sequence in max batch size
                     hold_sequence = np.random.choice(range(len(rays_o)), max_rays_in_gpu)  # pick outer_count in mask
