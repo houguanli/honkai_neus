@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import logging
 import argparse
 import numpy as np
@@ -13,74 +12,9 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset_json import Dataset
+from models.dataset import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
-
-
-def calc_new_pose(setting_path):
-    # TODO: read pose and movement from one json file and calc new pose
-    # returns new camera pose calculated by that json file
-    with open(setting_path, "r") as json_file:
-        all_json_data = json.load(json_file)
-
-    # q, t, original_mat = None, None, None
-    t, q, original_mat = all_json_data['translation'], all_json_data['rotation'], all_json_data["1_1_M"]
-    if q is None:
-        print("error at reading setting " + setting_path)
-        exit(-1)
-
-    w, x, y, z = q
-    rotate_mat = np.array([
-        [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-        [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
-    ])
-    transform_matrix = np.zeros((4, 4))
-    transform_matrix[0:3, 0:3] = rotate_mat
-    transform_matrix[0:3, 3] = t
-    transform_matrix[3, 3] = 1.0
-    res_mat = transform_matrix @ original_mat
-    # print("calc new mat at \n" + str(res_mat))
-    return res_mat
-
-
-def calc_new_poses(setting_path):
-    # TODO: read pose and movement from one json file and calc new poses
-    # this function returns multi changed poses, so it requires frame id
-    # returns new camera pose calculated by that json file
-    # set the data structure as following:
-    # {“frame_count" : total_count, "translation_index": i_th frame translation, "rotation_index" & camera_pose are same
-    # e.g for 3rd frame: "translation_index_3": 3 floats, "rotation_index_3" : 4 floats, "camera_pose_3" : 4*4 mat
-    # important to remember the index starts from 1!
-    with open(setting_path, "r") as json_file:
-        all_json_data = json.load(json_file)
-
-    # q, t, original_mat = None, None, None
-    frame_count = all_json_data["frame_count"]
-    tran_poses = []  # new camera pose after movement
-
-    for i in range(1, frame_count + 1):
-
-        t, q, original_mat = all_json_data['translation_' + str(i)], all_json_data['rotation_' + str(i)], all_json_data[
-            "camera_pose_" + str(i)]
-        if q is None:
-            print("error at reading setting " + setting_path)
-            exit(-1)
-
-        w, x, y, z = q
-        rotate_mat = np.array([
-            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
-        ])
-        transform_matrix = np.zeros((4, 4))
-        transform_matrix[0:3, 0:3] = rotate_mat
-        transform_matrix[0:3, 3] = t
-        transform_matrix[3, 3] = 1.0
-        tran_poses.append(transform_matrix @ original_mat)
-
-    return  tran_poses, frame_count
 
 
 class Runner:
@@ -152,6 +86,7 @@ class Runner:
                     model_list.append(model_name)
             model_list.sort()
             latest_model_name = model_list[-1]
+
         if latest_model_name is not None:
             logging.info('Find checkpoint: {}'.format(latest_model_name))
             self.load_checkpoint(latest_model_name)
@@ -167,10 +102,11 @@ class Runner:
         image_perm = self.get_image_perm()
 
         for iter_i in tqdm(range(res_step)):
-            # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            # data = self.dataset.select_random_rays_in_masks(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            rays_o, rays_d, true_rgb, mask = self.dataset.select_random_rays_in_masks(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+
+            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
+
             background_rgb = None
             if self.use_white_bkgd:
                 background_rgb = torch.ones([1, 3])
@@ -184,20 +120,25 @@ class Runner:
             render_out = self.renderer.render(rays_o, rays_d, near, far,
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
+
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
             gradient_error = render_out['gradient_error']
             weight_max = render_out['weight_max']
             weight_sum = render_out['weight_sum']
+
             # Loss
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
-            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb) ** 2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+
             eikonal_loss = gradient_error
+
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
-            loss = color_fine_loss + \
-                   eikonal_loss * self.igr_weight + \
+
+            loss = color_fine_loss +\
+                   eikonal_loss * self.igr_weight +\
                    mask_loss * self.mask_weight
 
             self.optimizer.zero_grad()
@@ -266,8 +207,7 @@ class Runner:
         copyfile(self.conf_path, os.path.join(self.base_exp_dir, 'recording', 'config.conf'))
 
     def load_checkpoint(self, checkpoint_name):
-        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name),
-                                map_location=self.device)
+        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name), map_location=self.device)
         self.nerf_outside.load_state_dict(checkpoint['nerf'])
         self.sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
         self.deviation_network.load_state_dict(checkpoint['variance_network_fine'])
@@ -288,42 +228,36 @@ class Runner:
         }
 
         os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
-        torch.save(checkpoint,
-                   os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
+        torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
 
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
-        debug_flag = False
-        if idx == 114:  # for debug
-            print("val idx = 0 rays")
-            debug_flag = True
-            idx = 0
+
         print('Validate: iter: {}, camera: {}'.format(self.iter_step, idx))
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
         rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
-        if debug_flag:  # for debug
-            print("val idx = 0 rays")
-            idx = 0
-            import pdb
-            pdb.set_trace()
-        rays_o, rays_d = rays_d.reshape(-1, 3).split(self.batch_size), rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+
         out_rgb_fine = []
         out_normal_fine = []
+
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
             background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+
             render_out = self.renderer.render(rays_o_batch,
                                               rays_d_batch,
                                               near,
                                               far,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
-            def feasible(key):
-                return (key in render_out) and (render_out[key] is not None)
+
+            def feasible(key): return (key in render_out) and (render_out[key] is not None)
 
             if feasible('color_fine'):
                 out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
@@ -391,45 +325,16 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
 
-    def render_novel_image_at(self, camera_pose, resolution_level):
-
-        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
-        H, W, _ = rays_o.shape
-        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
-        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
-
-        out_rgb_fine = []
-        for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
-            near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
-            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
-
-            render_out = self.renderer.render(rays_o_batch,
-                                              rays_d_batch,
-                                              near,
-                                              far,
-                                              cos_anneal_ratio=self.get_cos_anneal_ratio(),
-                                              background_rgb=background_rgb)
-
-            out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
-
-            del render_out
-
-        img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
-        return img_fine
-
-    def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
+    def validate_mesh(self, world_space=False, resolution=64, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
 
-        vertices, triangles = \
+        vertices, triangles =\
             self.renderer.extract_geometry(bound_min, bound_max, resolution=resolution, threshold=threshold)
         os.makedirs(os.path.join(self.base_exp_dir, 'meshes'), exist_ok=True)
 
         if world_space:
             vertices = vertices * self.dataset.scale_mats_np[0][0, 0] + self.dataset.scale_mats_np[0][:3, 3][None]
-            print("SCALE MAP")
-            print(self.dataset.scale_mats_np[0][0, 0])
-            print(self.dataset.scale_mats_np[0][:3, 3][None])
 
         mesh = trimesh.Trimesh(vertices, triangles)
         mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
@@ -444,7 +349,7 @@ class Runner:
             images.append(self.render_novel_image(img_idx_0,
                                                   img_idx_1,
                                                   np.sin(((i / n_frames) - 0.5) * np.pi) * 0.5 + 0.5,
-                                                  resolution_level=4))
+                          resolution_level=4))
         for i in range(n_frames):
             images.append(images[n_frames - i - 1])
 
@@ -461,75 +366,6 @@ class Runner:
 
         writer.release()
 
-    def save_render_pic_at(self, setting_json_path):
-
-        camera_pose = calc_new_pose(args.render_at_pose_path)
-        img = self.render_novel_image_at(camera_pose, 10)
-        set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
-        file_name_with_extension = os.path.basename(setting_json_path)
-        case_name, file_extension = os.path.splitext(file_name_with_extension)
-        render_path = set_dir + "/" + case_name + ".png"
-        print("Saving render img at " + render_path)
-        cv.imwrite(render_path, img)
-
-        # save rays temply here
-        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
-        dict_, index, cl_count = [], 0, 0
-        for cls in rays_o:
-            index = 0
-            dls = rays_d[cl_count]
-            for oi in cls:
-                di = dls[index]
-                dict_.append(oi.tolist())
-                dict_.append(di.tolist())
-                index = index + 1
-            cl_count = cl_count + 1
-
-        ra_path = set_dir + "/" + case_name + ".txt"
-        print("Saving ray with count " + str(cl_count * index))
-
-        with open(ra_path, 'w') as f:
-            for vector in dict_:
-                # 将向量转换为字符串，并写入到文件中
-                f.write(str(vector) + '\n')
-        # finish tmp_saving
-        return
-
-    def save_render_pics_at(self, setting_json_path):
-
-        camera_poses, count = calc_new_poses(args.render_at_pose_path)
-        for i in range(1, count + 1):
-            camera_pose = camera_poses[i - 1]  # get the pose
-            img = self.render_novel_image_at(camera_pose, 10)
-            set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
-            file_name_with_extension = os.path.basename(setting_json_path)
-            case_name, file_extension = os.path.splitext(file_name_with_extension)
-            render_path = set_dir + "/" + case_name + str(i) + ".png"
-            print("Saving render img at " + render_path)
-            cv.imwrite(render_path, img)
-
-            # save rays temply here
-            rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
-            dict_, index, cl_count = [], 0, 0
-            for cls in rays_o:
-                index = 0
-                dls = rays_d[cl_count]
-                for oi in cls:
-                    di = dls[index]
-                    dict_.append(oi.tolist())
-                    dict_.append(di.tolist())
-                    index = index + 1
-                cl_count = cl_count + 1
-
-            ra_path = set_dir + "/" + case_name + ".txt"
-            # print("Saving ray with count " + str(cl_count * index))
-            with open(ra_path, 'w') as f:
-                for vector in dict_:
-                    # 将向量转换为字符串，并写入到文件中
-                    f.write(str(vector) + '\n')
-        # finish tmp_saving
-        return
-
 
 if __name__ == '__main__':
     print('Hello Wooden')
@@ -542,7 +378,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/base.conf')
     parser.add_argument('--mode', type=str, default='train')
-    parser.add_argument('--render_at_pose_path', type=str, default="./confs/base_movement.json")
     parser.add_argument('--mcube_threshold', type=float, default=0.0)
     parser.add_argument('--is_continue', default=False, action="store_true")
     parser.add_argument('--gpu', type=int, default=0)
@@ -556,51 +391,9 @@ if __name__ == '__main__':
     if args.mode == 'train':
         runner.train()
     elif args.mode == 'validate_mesh':
-        runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
-    elif args.mode == 'render_at':
-        runner.save_render_pic_at(args.render_at_pose_path)
-    elif args.mode == 'render_at_s':
-        runner.save_render_pics_at(args.render_at_pose_path)
+        runner.validate_mesh(world_space=True, resolution=512, threshold=args.mcube_threshold)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
-    elif args.mode.startswith('debug'):  # Interpolate views given two image indices
-        runner.validate_image(idx=114)
-    elif args.mode.startswith('debug__'):  # Interpolate views given two image indices
-        runner.dataset.select_random_rays_in_masks(img_idx=0, batch_size=512)
-
-
-#  example cmd in rebuilding:
-"""
-conda activate neus
-cd D:/gitwork/NeuS
-D:
-python exp_runner.py --mode render_at --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/NeuS/dynamic_test/test_render.json
-python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
-python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
-
-python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
-python exp_runner.py --mode train --conf ./confs/womask_js_bk.conf --case r_bk --is_continue
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single.conf --case real_world_normal --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single.conf --case real_world_normal
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_sparse.conf --case real_world_sparse
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
-
-python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_static_test
-python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_high_res
-python exp_runner.py --mode train --conf ./confs/womask_blender_high_res.conf --case blender_high_res
-
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object2 
-
-python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
-
-
-
-
-"""
