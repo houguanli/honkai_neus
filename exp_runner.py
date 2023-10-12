@@ -12,7 +12,7 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset import Dataset
+from models.dataset_json import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 
@@ -397,3 +397,32 @@ if __name__ == '__main__':
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
+
+
+"""
+conda activate neus
+cd D:/gitwork/NeuS
+D:
+python exp_runner.py --mode render_at --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/NeuS/dynamic_test/test_render.json
+python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
+python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
+
+python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
+python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
+python exp_runner.py --mode train --conf ./confs/womask_js_bk.conf --case r_bk --is_continue
+python exp_runner.py --mode train --conf ./confs/womask_js_bk_single.conf --case real_world_normal --is_continue
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single.conf --case real_world_normal
+python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_sparse.conf --case real_world_sparse
+python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
+
+python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_static_test
+python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_high_res
+python exp_runner.py --mode train --conf ./confs/womask_blender_high_res.conf --case blender_high_res
+
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object2 
+
+python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
+"""
