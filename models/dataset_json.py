@@ -87,8 +87,8 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([0.0, 0.0, -0.1])
-        object_bbox_max = np.array([0.8, 0.8, 0.4])
+        object_bbox_min = np.array([-0.3, -0.3, 0])
+        object_bbox_max = np.array([0.3, 0.3, 0.3])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
 

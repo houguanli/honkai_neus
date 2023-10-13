@@ -429,5 +429,6 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.co
 
 python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj2.conf --case rws_object3
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4
 
 """
