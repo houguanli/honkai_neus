@@ -95,7 +95,7 @@ class Dataset:
         self.focus_rays_in_mask = conf.get_bool('focus_rays_in_mask')  # this requires whether gen all rays in mask
         self.rays_o_in_masks, self.rays_v_in_masks, self.rays_color_in_masks = None, None, None
 
-        def gen_all_rays_in_mask(max_rays_in_gpu=100000):
+        def gen_all_rays_in_mask(max_rays_in_gpu=2000000):
             # TODO: gen all rays_o and rays_v in mask for faster training
             print("----------------generating all rays within mask-----------------")
             rays_o_in_masks, rays_v_in_masks, rays_color_in_masks = [], [], []
@@ -121,7 +121,7 @@ class Dataset:
 
                 rays_o, rays_v, rays_color = rays_o[rays_mask].reshape(-1, 3), rays_v[rays_mask].reshape(-1, 3), \
                     rays_color[rays_mask].reshape(-1, 3)  # H*W{mask), 3
-                print("hold " + str(rays_o.shape[0]) + "rays for image " + str(index + 1) )
+                print("hold " + str(rays_o.shape[0]) + "rays for image " + str(index + 1))
                 if len(rays_o) > max_rays_in_gpu:
                     # hold as a random sequence in max batch size
                     hold_sequence = np.random.choice(range(len(rays_o)), max_rays_in_gpu)  # pick outer_count in mask
