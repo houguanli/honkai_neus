@@ -134,14 +134,14 @@ class Runner:
             # Loss
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
-            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+            psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb) ** 2 * mask).sum() / (mask_sum * 3.0)).sqrt())
 
             eikonal_loss = gradient_error
 
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
 
-            loss = color_fine_loss +\
-                   eikonal_loss * self.igr_weight +\
+            loss = color_fine_loss + \
+                   eikonal_loss * self.igr_weight + \
                    mask_loss * self.mask_weight
 
             self.optimizer.zero_grad()
@@ -210,7 +210,8 @@ class Runner:
         copyfile(self.conf_path, os.path.join(self.base_exp_dir, 'recording', 'config.conf'))
 
     def load_checkpoint(self, checkpoint_name):
-        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name), map_location=self.device)
+        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name),
+                                map_location=self.device)
         self.nerf_outside.load_state_dict(checkpoint['nerf'])
         self.sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
         self.deviation_network.load_state_dict(checkpoint['variance_network_fine'])
@@ -231,7 +232,8 @@ class Runner:
         }
 
         os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
-        torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
+        torch.save(checkpoint,
+                   os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
 
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
@@ -260,7 +262,8 @@ class Runner:
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
 
-            def feasible(key): return (key in render_out) and (render_out[key] is not None)
+            def feasible(key):
+                return (key in render_out) and (render_out[key] is not None)
 
             if feasible('color_fine'):
                 out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
@@ -332,7 +335,7 @@ class Runner:
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
 
-        vertices, triangles =\
+        vertices, triangles = \
             self.renderer.extract_geometry(bound_min, bound_max, resolution=resolution, threshold=threshold)
         os.makedirs(os.path.join(self.base_exp_dir, 'meshes'), exist_ok=True)
 
@@ -352,7 +355,7 @@ class Runner:
             images.append(self.render_novel_image(img_idx_0,
                                                   img_idx_1,
                                                   np.sin(((i / n_frames) - 0.5) * np.pi) * 0.5 + 0.5,
-                          resolution_level=4))
+                                                  resolution_level=4))
         for i in range(n_frames):
             images.append(images[n_frames - i - 1])
 
@@ -368,6 +371,66 @@ class Runner:
             writer.write(image)
 
         writer.release()
+
+    def render_novel_image_at(self, camera_pose, resolution_level):
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
+        H, W, _ = rays_o.shape
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+        # import pdb
+        # pdb.set_trace()
+        out_rgb_fine = []
+        for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
+            near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
+            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+
+            render_out = self.renderer.render(rays_o_batch,
+                                              rays_d_batch,
+                                              near,
+                                              far,
+                                              cos_anneal_ratio=self.get_cos_anneal_ratio(),
+                                              background_rgb=background_rgb)
+            out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
+
+            del render_out
+        img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
+        return img_fine
+
+    def render_novel_image_with_RT(self):
+        q = [1, 0, 0, -0]
+        t = [0.000, 0.0000, 0]
+
+        w, x, y, z = q
+        rotate_mat = np.array([
+            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
+        ])
+        transform_matrix = np.zeros((4, 4))
+        transform_matrix[0:3, 0:3] = rotate_mat
+        transform_matrix[0:3, 3] = t
+        transform_matrix[3, 3] = 1.0
+        inverse_matrix = np.linalg.inv(transform_matrix)
+        original_mat = np.array(
+            [[-0.99903242,  0.04007744, - 0.01811151,  0.04768818],
+             [0.02115499,  0.07686777, - 0.99681684,  0.23043237],
+             [-0.03855767, - 0.99623549, - 0.07764123, 0.11947259],
+             [0.,          0.,          0.,          1.]]
+        )
+        # original_mat = np.eye(4)
+        # original_mat[3, :3] = [0.1, 0.1, 0.1]
+        # original_mat[3, 3] = 0.2
+        camera_pose = np.array(original_mat)
+        transform_matrix = inverse_matrix @ camera_pose
+        # transform_matrix =transform_matrix.astype(np.float32).cuda()
+        img = self.render_novel_image_at(transform_matrix, 1)
+        # img loss
+        # set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
+        # file_name_with_extension = os.path.basename(setting_json_path)
+        # case_name, file_extension = os.path.splitext(file_name_with_extension)
+        render_path = os.path.join(self.base_exp_dir, "test.png")
+        print("Saving render img at " + render_path)
+        cv.imwrite(render_path, img)
 
 
 if __name__ == '__main__':
@@ -394,13 +457,14 @@ if __name__ == '__main__':
     if args.mode == 'train':
         runner.train()
     elif args.mode == 'validate_mesh':
-        runner.validate_mesh(world_space=True, resolution=512, threshold=args.mcube_threshold)
+        runner.validate_mesh(world_space=False, resolution=128, threshold=args.mcube_threshold)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
-
+    elif args.mode == 'render_rt':
+        runner.render_novel_image_with_RT()
 
 """
 conda activate neus
@@ -430,5 +494,5 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.co
 python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj2.conf --case rws_object3
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4
-
+python exp_runner.py --mode render_rt --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4 --is_continue
 """

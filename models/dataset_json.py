@@ -87,7 +87,7 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([-0.3, -0.3, 0])
+        object_bbox_min = np.array([-0.3, -0.3, -0.1])
         object_bbox_max = np.array([0.3, 0.3, 0.3])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
@@ -159,8 +159,8 @@ class Dataset:
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
     def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
-        transform_matrix = torch.from_numpy(transform_matrix)
-        transform_matrix.cuda()  # add to cuda
+        transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to(self.device)
+        # transform_matrix.cuda()  # add to cuda
         l = resolution_level
         tx = torch.linspace(0, self.W - 1, self.W // l)
         ty = torch.linspace(0, self.H - 1, self.H // l)
