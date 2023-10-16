@@ -108,6 +108,7 @@ class Runner:
             else:
                 data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
                 rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            # center = torch.Tensor([0.05, -0.1, 0]).cuda()
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
 
             background_rgb = None

@@ -87,10 +87,17 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([-0.3, -0.3, -0.1])
-        object_bbox_max = np.array([0.3, 0.3, 0.3])
+        object_bbox_min = np.array([-.0, -0.3, -0.0])
+        object_bbox_max = np.array([0.3, 0.0, 0.2])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
+        if conf.get_bool('with_sphere'):  # TODO: need to reset here
+            self.sphere_center = torch.from_numpy(np.array([0.08, -0.06, 0.04]).astype(np.float32)).cuda()
+            self.radius = 0.2
+        else:
+            self.sphere_center = torch.zeros(3)
+            self.radius = 1
+
 
         self.focus_rays_in_mask = conf.get_bool('focus_rays_in_mask')  # this requires whether gen all rays in mask
         self.rays_o_in_masks, self.rays_v_in_masks, self.rays_color_in_masks = None, None, None
@@ -301,12 +308,20 @@ class Dataset:
         rays_o = trans[None, None, :3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
-    def near_far_from_sphere(self, rays_o, rays_d):
-        a = torch.sum(rays_d ** 2, dim=-1, keepdim=True)
-        b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
-        mid = 0.5 * (-b) / a
-        near = mid - 1.0
-        far = mid + 1.0
+    def near_far_from_sphere(self, rays_o, rays_d, center=torch.zeros(3).cuda(), radius=1.0): # this should be set from the org setting conf or json
+        if self.sphere_center is not None:
+            center = self.sphere_center
+            radius = self.radius
+        a = torch.sum(rays_d ** 2, dim=-1, keepdim=True)  #
+        # print("running on center and radius " + str(center) + " " + str(radius))
+        # b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+        # mid = 0.5 * (-b) / a
+
+        b_2 = torch.sum((rays_o - center) * rays_d, dim=-1, keepdim=True)
+        mid = (-b_2) / a
+
+        near = mid - radius
+        far = mid + radius
         # import pdb
         # pdb.set_trace()
         return near, far
