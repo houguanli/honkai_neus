@@ -399,7 +399,7 @@ class Runner:
 
     def render_novel_image_with_RT(self):
         q = [1, 0, 0, -0]
-        t = [0.000, 0.0000, 0]
+        t = [0.000, 0.0000, 0.06]
 
         w, x, y, z = q
         rotate_mat = np.array([
@@ -413,9 +413,9 @@ class Runner:
         transform_matrix[3, 3] = 1.0
         inverse_matrix = np.linalg.inv(transform_matrix)
         original_mat = np.array(
-            [[-0.99903242,  0.04007744, - 0.01811151,  0.04768818],
-             [0.02115499,  0.07686777, - 0.99681684,  0.23043237],
-             [-0.03855767, - 0.99623549, - 0.07764123, 0.11947259],
+            [[0.99913844, - 0.02643227, - 0.03199565,  0.03332534],
+             [0.03194597, - 0.00229971,  0.99948695, - 0.22578363],
+             [-0.02649229, - 0.99964796, - 0.00145332, 0.07182068],
              [0.,          0.,          0.,          1.]]
         )
         # original_mat = np.eye(4)
@@ -424,7 +424,7 @@ class Runner:
         camera_pose = np.array(original_mat)
         transform_matrix = inverse_matrix @ camera_pose
         # transform_matrix =transform_matrix.astype(np.float32).cuda()
-        img = self.render_novel_image_at(transform_matrix, 1)
+        img = self.render_novel_image_at(transform_matrix, 10)
         # img loss
         # set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
         # file_name_with_extension = os.path.basename(setting_json_path)
@@ -497,5 +497,5 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_ob
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5
 
-python exp_runner.py --mode render_rt --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4 --is_continue
+python exp_runner.py --mode render_rt --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 --is_continue
 """
