@@ -344,7 +344,7 @@ class Runner:
             vertices = vertices * self.dataset.scale_mats_np[0][0, 0] + self.dataset.scale_mats_np[0][:3, 3][None]
 
         mesh = trimesh.Trimesh(vertices, triangles)
-        mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
+        mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)), encoding='ascii')
 
         logging.info('End')
 
@@ -373,8 +373,8 @@ class Runner:
 
         writer.release()
 
-    def render_novel_image_at(self, camera_pose, resolution_level):
-        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
+    def render_novel_image_at(self, camera_pose, resolution_level, intrinsic_inv=None):
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv)
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
@@ -418,13 +418,17 @@ class Runner:
              [-0.02649229, - 0.99964796, - 0.00145332, 0.07182068],
              [0.,          0.,          0.,          1.]]
         )
+        intrinsic_mat = np.array(
+            [[196.04002654133333, 0, 256.14846416266664], [0, 195.57227938666668, 147.136028024], [0, 0, 1]]
+        )
+        intrinsic_inv = torch.fromnumpy(intrinsic_mat.astype(np.float32)).cuda()
         # original_mat = np.eye(4)
         # original_mat[3, :3] = [0.1, 0.1, 0.1]
         # original_mat[3, 3] = 0.2
         camera_pose = np.array(original_mat)
         transform_matrix = inverse_matrix @ camera_pose
         # transform_matrix =transform_matrix.astype(np.float32).cuda()
-        img = self.render_novel_image_at(transform_matrix, 10)
+        img = self.render_novel_image_at(transform_matrix, resolution_level=10, intrinsic_inv=intrinsic_inv)
         # img loss
         # set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
         # file_name_with_extension = os.path.basename(setting_json_path)
@@ -497,5 +501,6 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_ob
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case rws_obj4
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5
 
-python exp_runner.py --mode render_rt --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 --is_continue
+python exp_runner.py --mode validate_mesh --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 --is_continue
+python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_multi_qrs_obj5.conf --case duck_3d
 """
