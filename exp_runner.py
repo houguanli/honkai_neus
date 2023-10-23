@@ -505,6 +505,6 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_ob
 
 python exp_runner.py --mode render_rtkm --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 --is_continue
 python exp_runner.py --mode validate_mesh --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case duck_3d --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case duck_3d_dense 
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj6.conf --case box 
 
 """

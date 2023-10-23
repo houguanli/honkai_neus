@@ -319,13 +319,20 @@ class Dataset:
         # b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
         # mid = 0.5 * (-b) / a
         #
-        b_2 = torch.sum((rays_o - center) * rays_d, dim=-1, keepdim=True)
-        mid = (-b_2) / a
+        b = 2.0 * torch.sum((rays_o - center) * rays_d, dim=-1, keepdim=True)
 
-        near = mid - radius
-        far = mid + radius
+        c = (torch.norm(rays_o, dim=1) ** 2) + (torch.norm(center, dim=0) ** 2).view(1)
+
+        c = c[:, None] - torch.Tensor([radius ** 2]).view(1) - 2.0 * torch.sum(rays_o * center, dim=-1, keepdim=True)
         # import pdb
         # pdb.set_trace()
+        delta2 = b ** 2 - 4 * a * c
+        delta2[delta2 < 0] = 0
+        delta = torch.sqrt(delta2)
+        mid = (-b) / a / 2.0
+        near = mid - delta
+        far = mid + delta
+
         return near, far
 
     def image_at(self, idx, resolution_level):
