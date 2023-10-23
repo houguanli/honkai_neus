@@ -87,12 +87,12 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([0.05, -0.2, -0.005])
+        object_bbox_min = np.array([0.00, -0.2, -0.005])
         object_bbox_max = np.array([0.25, 0.0, 0.13])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
         if conf.get_bool('with_sphere'):  # TODO: need to reset here
-            self.sphere_center = torch.from_numpy(np.array([0.08, -0.08, 0.02]).astype(np.float32)).cuda()
+            self.sphere_center = torch.from_numpy(np.array([0.08, -0.06, 0.04]).astype(np.float32)).cuda()
             self.radius = 0.2
         else:
             self.sphere_center = torch.zeros(3)
@@ -332,7 +332,8 @@ class Dataset:
         mid = (-b) / a / 2.0
         near = mid - delta
         far = mid + delta
-
+        if near < 0:  # avoid back render
+            near, far = mid, mid
         return near, far
 
     def image_at(self, idx, resolution_level):
