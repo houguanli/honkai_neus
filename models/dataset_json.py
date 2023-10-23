@@ -87,8 +87,8 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([-.0, -0.2, -0.005])
-        object_bbox_max = np.array([0.2, 0.0, 0.13])
+        object_bbox_min = np.array([-1.0, -01.2, -01.005])
+        object_bbox_max = np.array([01.2, 01.0, 01.13])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
         if conf.get_bool('with_sphere'):  # TODO: need to reset here
@@ -316,11 +316,11 @@ class Dataset:
             radius = self.radius
         a = torch.sum(rays_d ** 2, dim=-1, keepdim=True)  #
         # print("running on center and radius " + str(center) + " " + str(radius))
-        b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
-        mid = 0.5 * (-b) / a
+        # b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+        # mid = 0.5 * (-b) / a
         #
-        # b_2 = torch.sum((rays_o - center) * rays_d, dim=-1, keepdim=True)
-        # mid = (-b_2) / a
+        b_2 = torch.sum((rays_o - center) * rays_d, dim=-1, keepdim=True)
+        mid = (-b_2) / a
 
         near = mid - radius
         far = mid + radius
