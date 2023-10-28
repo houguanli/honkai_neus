@@ -464,7 +464,7 @@ if __name__ == '__main__':
     if args.mode == 'train':
         runner.train()
     elif args.mode == 'validate_mesh':
-        runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
+        runner.validate_mesh(world_space=False, resolution=128, threshold=args.mcube_threshold)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
@@ -506,5 +506,7 @@ python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_ob
 python exp_runner.py --mode render_rtkm --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 --is_continue
 python exp_runner.py --mode validate_mesh --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case duck_3d --is_continue
 python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj6.conf --case box 
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj5.conf --case rws_obj5 
+python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs_obj4.conf --case blender_obstacle
 
 """

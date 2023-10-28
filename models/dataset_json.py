@@ -87,8 +87,8 @@ class Dataset:
         self.image_pixels = self.H * self.W
 
         # Object scale mat: region of interest to **extract mes-h**
-        object_bbox_min = np.array([0.00, -0.2, -0.005])
-        object_bbox_max = np.array([0.25, 0.0, 0.13])
+        object_bbox_min = np.array([-03.00, -01.2, -03.005])
+        object_bbox_max = np.array([01.25, 01.0, 01.13])
         self.object_bbox_min = object_bbox_min
         self.object_bbox_max = object_bbox_max
         if conf.get_bool('with_sphere'):  # TODO: need to reset here
@@ -328,12 +328,12 @@ class Dataset:
         # pdb.set_trace()
         delta2 = b ** 2 - 4 * a * c
         delta2[delta2 < 0] = 0
-        delta = torch.sqrt(delta2)
+        delta = torch.sqrt(delta2) / a / 2.0
         mid = (-b) / a / 2.0
         near = mid - delta
         far = mid + delta
-        if near < 0:  # avoid back render
-            near, far = mid, mid
+        # if near < 0:  # avoid back render
+        #     near, far = mid, mid
         return near, far
 
     def image_at(self, idx, resolution_level):
