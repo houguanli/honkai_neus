@@ -20,7 +20,7 @@ def extract_fields(bound_min, bound_max, resolution, query_func):
                 for zi, zs in enumerate(Z):
                     xx, yy, zz = torch.meshgrid(xs, ys, zs)
                     pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1)
-                    val =query_func(pts).reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
+                    val = query_func(pts).reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
                     u[xi * N: xi * N + len(xs), yi * N: yi * N + len(ys), zi * N: zi * N + len(zs)] = val
     return u
 
@@ -31,10 +31,6 @@ def extract_geometry(bound_min, bound_max, resolution, threshold, query_func):
     vertices, triangles = mcubes.marching_cubes(u, threshold)
     b_max_np = bound_max.detach().cpu().numpy()
     b_min_np = bound_min.detach().cpu().numpy()
-    print("BB BOX::: ")
-    print(b_max_np)
-    print(b_min_np)
-    # import pdb; pdb.set_trace()
     vertices = vertices / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
     return vertices, triangles
 
@@ -108,7 +104,7 @@ class NeuSRenderer:
         pts = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # batch_size, n_samples, 3
 
         dis_to_center = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=True).clip(1.0, 1e10)
-        pts = torch.cat([pts / dis_to_center, 1.0 / dis_to_center], dim=-1)       # batch_size, n_samples, 4
+        pts = torch.cat([pts / dis_to_center, 1.0 / dis_to_center], dim=-1)  # batch_size, n_samples, 4
 
         dirs = rays_d[:, None, :].expand(batch_size, n_samples, 3)
 
@@ -220,14 +216,19 @@ class NeuSRenderer:
         pts = pts.reshape(-1, 3)
         dirs = dirs.reshape(-1, 3)
 
+        # import time
+        # t_begin = time.time()
         sdf_nn_output = sdf_network(pts)
         sdf = sdf_nn_output[:, :1]
         feature_vector = sdf_nn_output[:, 1:]
-
         gradients = sdf_network.gradient(pts).squeeze()
+        # t_end = time.time()
+        # print('sdf_network time: {}'.format(t_end - t_begin))
+        # import pdb
+        # pdb.set_trace()
         sampled_color = color_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, 3)
 
-        inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)           # Single parameter
+        inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)  # Single parameter
         inv_s = inv_s.expand(batch_size * n_samples, 1)
 
         true_cos = (dirs * gradients).sum(-1, keepdim=True)
@@ -257,15 +258,18 @@ class NeuSRenderer:
         if background_alpha is not None:
             alpha = alpha * inside_sphere + background_alpha[:, :n_samples] * (1.0 - inside_sphere)
             alpha = torch.cat([alpha, background_alpha[:, n_samples:]], dim=-1)
-            sampled_color = sampled_color * inside_sphere[:, :, None] +\
+            sampled_color = sampled_color * inside_sphere[:, :, None] + \
                             background_sampled_color[:, :n_samples] * (1.0 - inside_sphere)[:, :, None]
             sampled_color = torch.cat([sampled_color, background_sampled_color[:, n_samples:]], dim=1)
 
         weights = alpha * torch.cumprod(torch.cat([torch.ones([batch_size, 1]), 1. - alpha + 1e-7], -1), -1)[:, :-1]
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
+        depth_map = torch.sum(weights * z_vals, dim=-1, keepdim=True)
+        disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+
         color = (sampled_color * weights[:, :, None]).sum(dim=1)
-        if background_rgb is not None:    # Fixed background, usually black
+        if background_rgb is not None:  # Fixed background, usually black
             color = color + background_rgb * (1.0 - weights_sum)
 
         # Eikonal loss
@@ -277,6 +281,8 @@ class NeuSRenderer:
             'color': color,
             'sdf': sdf,
             'dists': dists,
+            'depth_map': depth_map,
+            'disp_map': disp_map,
             'gradients': gradients.reshape(batch_size, n_samples, 3),
             's_val': 1.0 / inv_s,
             'mid_z_vals': mid_z_vals,
@@ -288,7 +294,7 @@ class NeuSRenderer:
 
     def render(self, rays_o, rays_d, near, far, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0):
         batch_size = len(rays_o)
-        sample_dist = 2.0 / self.n_samples   # Assuming the region of interest is a unit sphere
+        sample_dist = 2.0 / self.n_samples  # Assuming the region of interest is a unit sphere
         z_vals = torch.linspace(0.0, 1.0, self.n_samples)
         z_vals = near + (far - near) * z_vals[None, :]
 
@@ -330,7 +336,7 @@ class NeuSRenderer:
                                                 z_vals,
                                                 sdf,
                                                 self.n_importance // self.up_sample_steps,
-                                                64 * 2**i)
+                                                64 * 2 ** i)
                     z_vals, sdf = self.cat_z_vals(rays_o,
                                                   rays_d,
                                                   z_vals,
@@ -367,9 +373,13 @@ class NeuSRenderer:
         weights_sum = weights.sum(dim=-1, keepdim=True)
         gradients = ret_fine['gradients']
         s_val = ret_fine['s_val'].reshape(batch_size, n_samples).mean(dim=-1, keepdim=True)
-
+        depth_map = ret_fine['depth_map']
+        disp_map = ret_fine['disp_map']
+        
         return {
             'color_fine': color_fine,
+            'depth_map': depth_map,
+            'disp_map': disp_map,
             's_val': s_val,
             'cdf_fine': ret_fine['cdf'],
             'weight_sum': weights_sum,
@@ -378,6 +388,56 @@ class NeuSRenderer:
             'weights': weights,
             'gradient_error': ret_fine['gradient_error'],
             'inside_sphere': ret_fine['inside_sphere']
+        }
+
+    # this funtion is written for dynamic rendering
+    # better to use R-T transform when rendering a single ray, make easier to adapt in the future
+    # rays_gt = rays ground truth [batch_size, 3], infering the ground truth RGB.
+    def render_dynamic(self, rays_o, rays_d, near, far, R, T, camera_c2w, perturb_overwrite=-1, background_rgb=None,
+                       additional_transform = None, cos_anneal_ratio=0.0):
+        # apply R to rays_d and T to rays_o, requires grad here
+
+        batch_size = len(rays_o)
+        w, x, y, z = R
+        rotate_mat = torch.zeros((3, 3), device=rays_o.device)
+        rotate_mat[0, 0] = 1 - 2 * (y ** 2 + z ** 2)
+        rotate_mat[0, 1] = 2 * (x * y - z * w)
+        rotate_mat[0, 2] = 2 * (x * z + y * w)
+        rotate_mat[1, 0] = 2 * (x * y + z * w)
+        rotate_mat[1, 1] = 1 - 2 * (x ** 2 + z ** 2)
+        rotate_mat[1, 2] = 2 * (y * z - x * w)
+        rotate_mat[2, 0] = 2 * (x * z - y * w)
+        rotate_mat[2, 1] = 2 * (y * z + x * w)
+        rotate_mat[2, 2] = 1 - 2 * (x ** 2 + y ** 2)
+        transform_matrix = torch.zeros((4, 4), device=rays_o.device)
+        transform_matrix[0:3, 0:3] = rotate_mat
+        transform_matrix[0:3, 3] = T
+        transform_matrix[3, 3] = 1.0
+        if additional_transform is not None: # now rendering with addtional pose
+            transform_matrix = torch.matmul(transform_matrix, additional_transform)
+        transform_matrix_inv = torch.inverse(transform_matrix)  # make an inverse
+        # rotate_mat = transform_matrix_inv[:3, :3]
+        # rotate_mat = torch.inverse(rotate_mat)
+        # T1_expand = (transform_matrix[0:3, 3]).repeat(batch_size, 1)  # expand the trans, rays_o = 
+        # rays_d = torch.matmul(rotate_mat[None, :3, :3], rays_d[:, :, None]).squeeze()  # batch_size, 3
+        camera_pos = torch.matmul(transform_matrix_inv, camera_c2w)
+        rays_d = torch.matmul(transform_matrix_inv[None, :3, :3], rays_d[:, :, None]).squeeze(dim=-1)  # W, H, 3
+        # print(rays_d.shape)
+        # rays_o = torch.matmul(camera_pos[None, :3, :3], rays_o[:, :, None]).squeeze()  # batch_size, 3
+        # rays_o = rays_o + T1_expand  # batch_size 3, R1*T0 + T1
+        rays_o = camera_pos[None, :3, 3].expand(rays_d.shape)  # W, H, 3
+        # print("equivalent c2w mat: \n", camera_pos.clone().detach().cpu())
+        render_out = self.render(rays_o, rays_d, near, far, perturb_overwrite, background_rgb, cos_anneal_ratio)
+        return render_out
+
+    def require_gradients(self, pts):
+        count = len(pts)  # pts should be n, 3
+        sdf_nn_output = self.sdf_network(pts)
+        sdf = sdf_nn_output[:, :1]
+        gradients = self.sdf_network.gradient(pts).squeeze()
+        return {
+            "sdf": sdf,
+            "gradients": gradients
         }
 
     def extract_geometry(self, bound_min, bound_max, resolution, threshold=0.0):

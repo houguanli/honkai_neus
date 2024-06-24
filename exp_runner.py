@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import logging
 import argparse
 import numpy as np
@@ -13,75 +12,11 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset_json import Dataset
+from models.dataset import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
-
-
-def calc_new_pose(setting_path):
-    # TODO: read pose and movement from one json file and calc new pose
-    # returns new camera pose calculated by that json file
-    with open(setting_path, "r") as json_file:
-        all_json_data = json.load(json_file)
-
-    # q, t, original_mat = None, None, None
-    t, q, original_mat = all_json_data['translation'], all_json_data['rotation'], all_json_data["1_1_M"]
-    if q is None:
-        print("error at reading setting " + setting_path)
-        exit(-1)
-
-    w, x, y, z = q
-    rotate_mat = np.array([
-        [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-        [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
-    ])
-    transform_matrix = np.zeros((4, 4))
-    transform_matrix[0:3, 0:3] = rotate_mat
-    transform_matrix[0:3, 3] = t
-    transform_matrix[3, 3] = 1.0
-    res_mat = transform_matrix @ original_mat
-    # print("calc new mat at \n" + str(res_mat))
-    return res_mat
-
-
-def calc_new_poses(setting_path):
-    # TODO: read pose and movement from one json file and calc new poses
-    # this function returns multi changed poses, so it requires frame id
-    # returns new camera pose calculated by that json file
-    # set the data structure as following:
-    # {“frame_count" : total_count, "translation_index": i_th frame translation, "rotation_index" & camera_pose are same
-    # e.g for 3rd frame: "translation_index_3": 3 floats, "rotation_index_3" : 4 floats, "camera_pose_3" : 4*4 mat
-    # important to remember the index starts from 1!
-    with open(setting_path, "r") as json_file:
-        all_json_data = json.load(json_file)
-
-    # q, t, original_mat = None, None, None
-    frame_count = all_json_data["frame_count"]
-    tran_poses = []  # new camera pose after movement
-
-    for i in range(1, frame_count + 1):
-
-        t, q, original_mat = all_json_data['translation_' + str(i)], all_json_data['rotation_' + str(i)], all_json_data[
-            "camera_pose_" + str(i)]
-        if q is None:
-            print("error at reading setting " + setting_path)
-            exit(-1)
-
-        w, x, y, z = q
-        rotate_mat = np.array([
-            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
-        ])
-        transform_matrix = np.zeros((4, 4))
-        transform_matrix[0:3, 0:3] = rotate_mat
-        transform_matrix[0:3, 3] = t
-        transform_matrix[3, 3] = 1.0
-        tran_poses.append(transform_matrix @ original_mat)
-
-    return  tran_poses, frame_count
-
+from models.common import * 
+import json
 
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False):
@@ -152,6 +87,7 @@ class Runner:
                     model_list.append(model_name)
             model_list.sort()
             latest_model_name = model_list[-1]
+
         if latest_model_name is not None:
             logging.info('Find checkpoint: {}'.format(latest_model_name))
             self.load_checkpoint(latest_model_name)
@@ -167,14 +103,18 @@ class Runner:
         image_perm = self.get_image_perm()
 
         for iter_i in tqdm(range(res_step)):
-            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
-            # data = self.dataset.select_random_rays_in_masks(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            # rays_o, rays_d, true_rgb, mask = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            if self.dataset.focus_rays_in_mask:
+                rays_o, rays_d, true_rgb, mask = self.dataset.select_random_rays_in_masks(
+                    image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            else:
+                data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+                rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            # center = torch.Tensor([0.05, -0.1, 0]).cuda()
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
+
             background_rgb = None
             if self.use_white_bkgd:
-                background_rgb = torch.ones([1, 3])
+                background_rgb = torch.zeros([1, 3])
 
             if self.mask_weight > 0.0:
                 mask = (mask > 0.5).float()
@@ -185,18 +125,23 @@ class Runner:
             render_out = self.renderer.render(rays_o, rays_d, near, far,
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
+
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
             gradient_error = render_out['gradient_error']
             weight_max = render_out['weight_max']
             weight_sum = render_out['weight_sum']
+
             # Loss
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
             psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb) ** 2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+
             eikonal_loss = gradient_error
+
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
+
             loss = color_fine_loss + \
                    eikonal_loss * self.igr_weight + \
                    mask_loss * self.mask_weight
@@ -232,6 +177,11 @@ class Runner:
 
             if self.iter_step % len(image_perm) == 0:
                 image_perm = self.get_image_perm()
+
+    def train_dynamic(self):
+        # TODO use render_dynamic to pass img_loss
+        self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'dynamic_logs'))
+        return
 
     def get_image_perm(self):
         return torch.randperm(self.dataset.n_images)
@@ -295,28 +245,21 @@ class Runner:
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
-        debug_flag = False
-        if idx == 114:  # for debug
-            print("val idx = 0 rays")
-            debug_flag = True
-            idx = 0
         print('Validate: iter: {}, camera: {}'.format(self.iter_step, idx))
-
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
         rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
-        if debug_flag:  # for debug
-            print("val idx = 0 rays")
-            idx = 0
-            import pdb
-            pdb.set_trace()
-        rays_o, rays_d = rays_d.reshape(-1, 3).split(self.batch_size), rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+
         out_rgb_fine = []
         out_normal_fine = []
+        depth_map = []
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
-            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+            background_rgb = torch.zeros([1, 3]) if self.use_white_bkgd else None
+
             render_out = self.renderer.render(rays_o_batch,
                                               rays_d_batch,
                                               near,
@@ -335,8 +278,11 @@ class Runner:
                     normals = normals * render_out['inside_sphere'][..., None]
                 normals = normals.sum(dim=1).detach().cpu().numpy()
                 out_normal_fine.append(normals)
+            if feasible('depth_map'):
+                depth_map.append(render_out['depth_map'].detach().cpu().numpy())
             del render_out
-
+        # depth_map = (depth_map - np.min(depth_map)) / (np.max(depth_map) - np.min(depth_map))
+        # import pdb; pdb.set_trace()
         img_fine = None
         if len(out_rgb_fine) > 0:
             img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3, -1]) * 256).clip(0, 255)
@@ -348,6 +294,9 @@ class Runner:
             normal_img = (np.matmul(rot[None, :, :], normal_img[:, :, None])
                           .reshape([H, W, 3, -1]) * 128 + 128).clip(0, 255)
 
+        if len(depth_map) > 0:
+            depth_map = (np.concatenate(depth_map, axis=0).reshape([H, W, -1]) * 256).clip(0, 255).astype(np.uint8)
+
         os.makedirs(os.path.join(self.base_exp_dir, 'validations_fine'), exist_ok=True)
         os.makedirs(os.path.join(self.base_exp_dir, 'normals'), exist_ok=True)
 
@@ -358,6 +307,11 @@ class Runner:
                                         '{:0>8d}_{}_{}.png'.format(self.iter_step, i, idx)),
                            np.concatenate([img_fine[..., i],
                                            self.dataset.image_at(idx, resolution_level=resolution_level)]))
+            if len(depth_map) > 0:
+                cv.imwrite(os.path.join(self.base_exp_dir,
+                                        'validations_fine',
+                                        '{:0>8d}_{}_{}_depth.png'.format(self.iter_step, i, idx)),
+                           depth_map[..., i])
             if len(out_normal_fine) > 0:
                 cv.imwrite(os.path.join(self.base_exp_dir,
                                         'normals',
@@ -376,7 +330,7 @@ class Runner:
         out_rgb_fine = []
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
-            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+            background_rgb = torch.zeros([1, 3]) if self.use_white_bkgd else None
 
             render_out = self.renderer.render(rays_o_batch,
                                               rays_d_batch,
@@ -392,17 +346,20 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
 
-    def render_novel_image_at(self, camera_pose, resolution_level):
-
-        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level)
+    def render_novel_image_at(self, camera_pose, resolution_level, intrinsic_inv=None):
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv)
+        
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
-
+        # import pdb; pdb.set_trace()
+        
         out_rgb_fine = []
+        normal_fine = []
+        n_samples = self.renderer.n_samples + self.renderer.n_importance
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
-            background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
+            background_rgb = torch.zeros([1, 3]) if self.use_white_bkgd else None
 
             render_out = self.renderer.render(rays_o_batch,
                                               rays_d_batch,
@@ -410,13 +367,11 @@ class Runner:
                                               far,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
-
             out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
-
+            # normal_fine.append((render_out['gradients'] * render_out['weights'][:, :n_samples, None])).detach().cpu().numpy()
             del render_out
-
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
-        return img_fine
+        return img_fine, normal_fine
 
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
@@ -428,13 +383,10 @@ class Runner:
 
         if world_space:
             vertices = vertices * self.dataset.scale_mats_np[0][0, 0] + self.dataset.scale_mats_np[0][:3, 3][None]
-            print("SCALE MAP")
-            print(self.dataset.scale_mats_np[0][0, 0])
-            print(self.dataset.scale_mats_np[0][:3, 3][None])
 
         mesh = trimesh.Trimesh(vertices, triangles)
-        mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
-
+        mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)), encoding='ascii')
+        print("save at " + os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
         logging.info('End')
 
     def interpolate_view(self, img_idx_0, img_idx_1):
@@ -453,19 +405,13 @@ class Runner:
         video_dir = os.path.join(self.base_exp_dir, 'render')
         os.makedirs(video_dir, exist_ok=True)
         h, w, _ = images[0].shape
-        writer = cv.VideoWriter(os.path.join(video_dir,
-                                             '{:0>8d}_{}_{}.mp4'.format(self.iter_step, img_idx_0, img_idx_1)),
-                                fourcc, 30, (w, h))
-
+        writer = cv.VideoWriter(os.path.join(video_dir,'{:0>8d}_{}_{}.mp4'.format(self.iter_step, img_idx_0, img_idx_1)),fourcc, 30, (w, h))
         for image in images:
             writer.write(image)
-
         writer.release()
 
     def save_render_pic_at(self, setting_json_path):
-
-        camera_pose = calc_new_pose(args.render_at_pose_path)
-        img = self.render_novel_image_at(camera_pose, 10)
+        img = self.render_novel_image_at(camera_pose, 2)
         set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
         file_name_with_extension = os.path.basename(setting_json_path)
         case_name, file_extension = os.path.splitext(file_name_with_extension)
@@ -473,85 +419,170 @@ class Runner:
         print("Saving render img at " + render_path)
         cv.imwrite(render_path, img)
 
-        # save rays temply here
-        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
-        dict_, index, cl_count = [], 0, 0
-        for cls in rays_o:
-            index = 0
-            dls = rays_d[cl_count]
-            for oi in cls:
-                di = dls[index]
-                dict_.append(oi.tolist())
-                dict_.append(di.tolist())
-                index = index + 1
-            cl_count = cl_count + 1
+    def render_motion(self, setting_json_path):
+        with open(setting_json_path, "r") as json_file:
+            motion_data = json.load(json_file)
+        if motion_data["frames"] is None:
+            print_error("must provide a sequence of motion information")
+            exit()
+        frames = motion_data["frames"]
+        print_info(f"{frames} frames will be rendered.")
+        motion_transforms = motion_data["results"]
+        original_mat = motion_data["1_1_M"]
+        if original_mat == None:
+            print_error("static camera information must be provided")
+        for i in tqdm(range(1)):
+            motion_transform = motion_transforms[i]
+            assert i == motion_transform["frame_id"], "invalid frame sequence"
+            t, q = motion_transform['translation'], motion_transform['rotation'],
+            q = [0.9515, 0.1449, 0.2685, 0.0381]
+            t = [0000, 0.0000, 0.8659]
+            w, x, y, z = q
+            rotate_mat = np.array([
+                [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
+            ])
+            transform_matrix = np.zeros((4, 4))
+            transform_matrix[0:3, 0:3] = rotate_mat
+            transform_matrix[0:3, 3] = t
+            transform_matrix[3, 3] = 1.0
+            inverse_matrix = np.linalg.inv(transform_matrix)
+            camera_pose = np.array(original_mat)
 
-        ra_path = set_dir + "/" + case_name + ".txt"
-        print("Saving ray with count " + str(cl_count * index))
-
-        with open(ra_path, 'w') as f:
-            for vector in dict_:
-                # 将向量转换为字符串，并写入到文件中
-                f.write(str(vector) + '\n')
-        # finish tmp_saving
-        return
-
-    def save_render_pics_at(self, setting_json_path):
-
-        camera_poses, count = calc_new_poses(args.render_at_pose_path)
-        for i in range(1, count + 1):
-            camera_pose = camera_poses[i - 1]  # get the pose
-            img = self.render_novel_image_at(camera_pose, 10)
+            img = self.render_novel_image_at(camera_pose, 2)
+            # img loss
             set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
             file_name_with_extension = os.path.basename(setting_json_path)
             case_name, file_extension = os.path.splitext(file_name_with_extension)
-            render_path = set_dir + "/" + case_name + str(i) + ".png"
+            render_path = f"{set_dir}/test_render_motion{i:04d}.png"
             print("Saving render img at " + render_path)
             cv.imwrite(render_path, img)
+            print_info(f"finish rendering frame:{i}")
 
-            # save rays temply here
-            rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, 100)
-            dict_, index, cl_count = [], 0, 0
-            for cls in rays_o:
-                index = 0
-                dls = rays_d[cl_count]
-                for oi in cls:
-                    di = dls[index]
-                    dict_.append(oi.tolist())
-                    dict_.append(di.tolist())
-                    index = index + 1
-                cl_count = cl_count + 1
+        print_ok(f"{frames} images has been rendered!")
 
-            ra_path = set_dir + "/" + case_name + ".txt"
-            # print("Saving ray with count " + str(cl_count * index))
-            with open(ra_path, 'w') as f:
-                for vector in dict_:
-                    # 将向量转换为字符串，并写入到文件中
-                    f.write(str(vector) + '\n')
-        # finish tmp_saving
-        return
+    def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None, img_W=800, img_H=600, return_render_out=False, resolution_level=1):
+        if q is None or t is None:
+            q, t = [1, 0, 0, 0], [0, 0, 0] # this is a default setting
+            # q = [0, 0, 1, 0] 
+            # t = [0, -0.01, 0.066] # soap1 pose to soap2 pose 
+            # q = [0.9150, -0.2691, -0.1273,  0.2763]
+            # t = [0.1536, -0.1478,  0.3126]  # frame 0 qt calced from soap2 pose (default), IMP: pose2 is the default rendering pose !
+            # q = [0.12746657701903685 , -0.27666154933511306 , 0.9138042514674574 , -0.26945212785406775]
+            # t = [0.13278135983999997 , -0.12696580667999996 , 0.3725301366] # eqv rt for soap1 pose   
+            # q = [ 0.6053165197372437, 0.2681955397129059, -0.37045902013778687, 0.6537007689476013]
+            # t = [ 0.24793949723243713, 0.6238101124763489, 0.677591860294342] # 20th frame qt for pose2
+            q, t = [0.1830127090215683,-0.6830127239227295,-0.1830127090215683,-0.6830127239227295],[0.1000, 0.40000, 0.25],
+        w, x, y, z = q
+        if original_mat is None:
+            original_mat = np.array(
+        [
+            [
+                1.0,
+                -0.0,
+                -0.0,
+                -0.10000000149011612
+            ],
+            [
+                0.0,
+                -0.9929816722869873,
+                0.1182689294219017,
+                0.09290292859077454
+            ],
+            [
+                0.0,
+                -0.1182689294219017,
+                -0.992981493473053,
+                1.11918306350708
+            ],
+            [
+                0.0,
+                -0.0,
+                -0.0,
+                1.0
+            ]
+        ]
+        )
+        if intrinsic_mat is None:
+            intrinsic_mat = np.array(
+        [
+            [
+                1111.1110311937682,
+                0.0,
+                400.0
+            ],
+            [
+                0.0,
+                1111.1110311937682,
+                300.0
+            ],
+            [
+                0.0,
+                0.0,
+                1.0
+            ]
+        ]
+            )       
+        rotate_mat = np.array([
+            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
+        ])
+        transform_matrix = np.zeros((4, 4))
+        transform_matrix[0:3, 0:3] = rotate_mat
+        transform_matrix[0:3, 3] = t
+        transform_matrix[3, 3] = 1.0
+        inverse_matrix = np.linalg.inv(transform_matrix)
+        intrinsic_inv = torch.from_numpy(np.linalg.inv(intrinsic_mat).astype(np.float32)).cuda()
+        camera_pose = np.array(original_mat)
+        transform_matrix = inverse_matrix @ camera_pose
+        # transform_matrix = np.array([
+        #     [0.0433,   0.0397, -0.9953,  0.8153],
+        #     [ 0.9944,  -0.0608,  0.0418,  0.1112],
+        #     [-0.0613, -0.9963, -0.0445,  0.1639],
+        #     [ 0.0,          0.0,          0.0, 1]
+        # ]) # tmp
+        self.dataset.W = img_W
+        self.dataset.H = img_H
+        print("equivalent c2w mat: \n", transform_matrix)
+        # transform_matrix =transform_matrix.astype(np.float32).cuda()
+        img, normal = self.render_novel_image_at(transform_matrix, resolution_level=resolution_level, intrinsic_inv=intrinsic_inv)
+        # img loss
+        # set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
+        # file_name_with_extension = os.path.basename(setting_json_path)
+        # case_name, file_extension = os.path.splitext(file_name_with_extension)
+        render_path = os.path.join(self.base_exp_dir, "test_" + str(post_fix) + ".png")
+        if return_render_out:
+            return img
+        else:
+            cv.imwrite(render_path, img)
+            print("Saving render img at " + render_path)
+            return None
+
+    def get_runner(neus_conf_path, case_name, is_continue):
+        return Runner(neus_conf_path, mode="train", case=case_name, is_continue=is_continue)
 
 
 if __name__ == '__main__':
-    print('Hello Wooden')
+    print('Genshin Nerf, start!!!')
 
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
+    # torch.cuda.set_device(args.gpu)
     FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
     logging.basicConfig(level=logging.DEBUG, format=FORMAT)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/base.conf')
     parser.add_argument('--mode', type=str, default='train')
-    parser.add_argument('--render_at_pose_path', type=str, default="./confs/base_movement.json")
     parser.add_argument('--mcube_threshold', type=float, default=0.0)
     parser.add_argument('--is_continue', default=False, action="store_true")
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--case', type=str, default='')
-
+    parser.add_argument('--post_fix', type=str, default='0')
+    parser.add_argument('--resolution_level', type=int, default=1)
     args = parser.parse_args()
-
-    torch.cuda.set_device(args.gpu)
+    torch.cuda.set_device(args.gpu) 
     runner = Runner(args.conf, args.mode, args.case, args.is_continue)
 
     if args.mode == 'train':
@@ -560,45 +591,36 @@ if __name__ == '__main__':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
     elif args.mode == 'render_at':
         runner.save_render_pic_at(args.render_at_pose_path)
-    elif args.mode == 'render_at_s':
-        runner.save_render_pics_at(args.render_at_pose_path)
+    elif args.mode == 'validate_image':
+        runner.validate_image()
+    elif args.mode == 'render_motion':
+        runner.render_motion(args.render_at_pose_path)
+    elif args.mode == 'train_dynamic':
+        runner.train_dynamic_single_frame(args.render_at_pose_path)
+    elif args.mode == 'render_rtkm':
+        runner.render_novel_image_with_RTKM(post_fix=args.post_fix, resolution_level=args.resolution_level)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
         _, img_idx_0, img_idx_1 = args.mode.split('_')
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
-    elif args.mode.startswith('debug'):  # Interpolate views given two image indices
-        runner.validate_image(idx=114)
-    elif args.mode.startswith('debug__'):  # Interpolate views given two image indices
-        runner.dataset.select_random_rays_in_masks(img_idx=0, batch_size=512)
 
-
-#  example cmd in rebuilding:
 """
 conda activate neus
 cd D:/gitwork/NeuS
-D:
-python exp_runner.py --mode render_at --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/NeuS/dynamic_test/test_render.json
-python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
-python exp_runner.py --mode validate_mesh --conf ./confs/wmask.conf --case bird --is_continue
-
-python exp_runner.py --mode train --conf ./confs/womask.conf --case bird_ss --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js.conf --case sim_ball --is_continue
-python exp_runner.py --mode train --conf ./confs/womask_js_bk.conf --case r_bk --is_continue
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single.conf --case real_world_normal --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single.conf --case real_world_normal
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_sparse.conf --case real_world_sparse
-python exp_runner.py --mode train --conf ./confs/womask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case real_world_multi_qrs
-
-python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_static_test
-python exp_runner.py --mode train --conf ./confs/wmask_single_blender.conf --case blender_high_res
-python exp_runner.py --mode train --conf ./confs/womask_blender_high_res.conf --case blender_high_res
-
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
-python exp_runner.py --mode train --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_object2 
-
-python exp_runner.py --mode debug --conf ./confs/wmask_js_bk_single_multi_qrs.conf --case rws_obstacle --is_continue
-
+python exp_runner.py --mode train_dynamic --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/genshinnerf/dynamic_test/train_dynamic_setting.json
+python exp_runner.py --mode validate_mesh --conf ./confs/thin_structure.conf --case scene1 --is_continue --gpu 4
+python exp_runner.py --mode render_rtkm --conf ./confs/wmask_blender_bunny.conf --case bunny_original --is_continue
+python exp_runner.py --mode validate_image --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
+python exp_runner.py --mode validate_image --conf ./confs/thin_structure.conf --case scene1 --is_continue --gpu 4
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
+python exp_runner.py --mode train --conf ./confs/thin_structure_white_bkgd.conf --case bunny2
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case tree
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure.conf --case yoyo --is_continue --gpu 2 --post_fix 1
+python exp_runner.py --mode render_rtkm --conf ./confs/small_structure_white_bkgd.conf --case yoyoball --is_continue --gpu 2 --post_fix 6
+python exp_runner.py --mode render_rtkm --conf ./confs/tree_structure_white_bkgd.conf --case tree_original --is_continue --post_fix 0 --resolution_level 6
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap1_merge --is_continue --gpu 3 --post_fix _ --resolution_level 6
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 2 --post_fix 0 --resolution_level 6
+python exp_runner.py --mode render_rtkm --conf ./confs/small_structure_white_bkgd.conf --case yoyo_original_man_min --is_continue --post_fix 0 --resolution_level 6
+python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case dragon_pos2_delta --is_continue --post_fix 0 --resolution_level 6
 """

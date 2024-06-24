@@ -1,0 +1,10 @@
+{
+    "device": "cuda",
+    "objects_cnt": 2,
+    "obj_confs": {
+        "0_conf": "./confs/thin_structure_white_bkgd.conf",
+        "0_name": "bunny_stand",
+        "1_conf": "./confs/thin_structure_white_bkgd.conf",
+        "1_name": "bunny_lie"
+    }
+}
