@@ -23,13 +23,15 @@ def load_K_Rt_from_P(filename, P=None):
     R = out[1]
     t = out[2]
 
-    K = K / K[2, 2]  # normalize
+    K = K / K[2, 2]
     intrinsics = np.eye(4)
     intrinsics[:3, :3] = K
+
     pose = np.eye(4, dtype=np.float32)
     pose[:3, :3] = R.transpose()
     pose[:3, 3] = (t[:3] / t[3])[:, 0]
-
+    # print("calc intriscics ") 
+    # print(intrinsics)
     return intrinsics, pose
 
 
@@ -73,10 +75,8 @@ class Dataset:
             self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
             self.pose_all.append(torch.from_numpy(pose).float())
 
-
-
-        self.images = torch.from_numpy(self.images_np.astype(np.float32)).to(self.device)  # [n_images, H, W, 3]
-        self.masks = torch.from_numpy(self.masks_np.astype(np.float32)).to(self.device)   # [n_images, H, W, 3]
+        self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
+        self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
@@ -84,10 +84,8 @@ class Dataset:
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
 
-        object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
-        object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
-        # object_bbox_min = object_bbox_min * 10
-        # object_bbox_max = object_bbox_max * 10
+        object_bbox_min = np.array([-0.5, -0.5,  -0.005, 1.0])
+        object_bbox_max = np.array([ 0.5,  0.5,  0.5, 1.0])
         # Object scale mat: region of interest to **extract mesh**
         object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]
@@ -125,7 +123,7 @@ class Dataset:
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)    # batch_size, 3
         rays_v = torch.matmul(self.pose_all[img_idx, None, :3, :3], rays_v[:, :, None]).squeeze()  # batch_size, 3
         rays_o = self.pose_all[img_idx, None, :3, 3].expand(rays_v.shape) # batch_size, 3
-        return torch.cat([rays_o.to(self.device), rays_v.to(self.device), color, mask[:, :1]], dim=-1).cuda()    # batch_size, 10
+        return torch.cat([rays_o.cpu(), rays_v.cpu(), color, mask[:, :1]], dim=-1).cuda()    # batch_size, 10
 
     def gen_rays_between(self, idx_0, idx_1, ratio, resolution_level=1):
         """
@@ -139,8 +137,8 @@ class Dataset:
         p = torch.matmul(self.intrinsics_all_inv[0, None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
         trans = self.pose_all[idx_0, :3, 3] * (1.0 - ratio) + self.pose_all[idx_1, :3, 3] * ratio
-        pose_0 = self.pose_all[idx_0].detach().to(self.device).numpy()
-        pose_1 = self.pose_all[idx_1].detach().to(self.device).numpy()
+        pose_0 = self.pose_all[idx_0].detach().cpu().numpy()
+        pose_1 = self.pose_all[idx_1].detach().cpu().numpy()
         pose_0 = np.linalg.inv(pose_0)
         pose_1 = np.linalg.inv(pose_1)
         rot_0 = pose_0[:3, :3]
@@ -160,12 +158,19 @@ class Dataset:
         rays_o = trans[None, None, :3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
-    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
+    def set_image_w_h(self, w, h):
+        self.W = w
+        self.H = h
+
+    def gen_random_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
+        pixels_x = torch.randint(low=0, high=self.W, size=[batch_size])
+        pixels_y = torch.randint(low=0, high=self.H, size=[batch_size])
         transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32))
         transform_matrix = transform_matrix.cuda()  # add to cuda
+        transform_matrix.requires_grad_(True)
         l = resolution_level
-        tx = torch.linspace(0, self.W - 1, self.W // l)
-        ty = torch.linspace(0, self.H - 1, self.H // l)
+        tx = torch.linspace(0, self.W - 1, self.W // resolution_level)
+        ty = torch.linspace(0, self.H - 1, self.H // resolution_level)
         pixels_x, pixels_y = torch.meshgrid(tx, ty)
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1)  # W, H, 3
         # we assume that the fx fy in all intrinsic mats are the same, so use the first intrinsics_all_inv to gen rays
@@ -173,6 +178,24 @@ class Dataset:
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
         # import pdb
         # pdb.set_trace()
+        rays_v = torch.matmul(transform_matrix[None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
+        rays_o = transform_matrix[None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
+        return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3
+
+
+    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1, intrinsic_inv=None):
+        transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to(self.device)
+        if intrinsic_inv is None:
+            intrinsic_inv = self.intrinsics_all_inv[0]
+        # transform_matrix.cuda()  # add to cuda
+        l = resolution_level
+        tx = torch.linspace(0, self.W - 1, self.W // l)
+        ty = torch.linspace(0, self.H - 1, self.H // l)
+        pixels_x, pixels_y = torch.meshgrid(tx, ty)
+        p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1)  # W, H, 3
+        # we assume that the fx fy in all intrinsic mats are the same, so use the first intrinsics_all_inv to gen rays
+        p = torch.matmul(intrinsic_inv[None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
+        rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
         rays_v = torch.matmul(transform_matrix[None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
         rays_o = transform_matrix[None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3

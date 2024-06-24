@@ -50,9 +50,9 @@ def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_
     return images, masks, cameras_K, cameras_M  # returns numpy arrays
 
 def generate_rays_with_K_and_M(transform_matrix, intrinsic_mat, W, H, resolution_level=1):  # transform mat should be c2w mat, and numpy as input
-    transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to('cuda')  # add to cuda
-    intrinsic_mat_inv = np.linalg.inv(intrinsic_mat)
-    intrinsic_mat_inv = torch.from_numpy(intrinsic_mat_inv.astype(np.float32)).to('cuda')
+    # transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to('cuda')  # add to cuda
+    intrinsic_mat_inv = torch.inverse(intrinsic_mat)
+    # intrinsic_mat_inv = torch.from_numpy(intrinsic_mat_inv.astype(np.float32)).to('cuda')
     tx = torch.linspace(0, W - 1, W // resolution_level)
     ty = torch.linspace(0, H - 1, H // resolution_level)
     pixels_x, pixels_y = torch.meshgrid(tx, ty)
@@ -67,7 +67,6 @@ def generate_all_rays(imgs, masks, cameras_K, cameras_c2w, W_all, H_all):
     # this function generate rays from given img and camera_K & c2w, also returns rays_gt as reference
     # assume input raw images are 255-uint, this function transformed to 1.0-up float0
     # stack the result into [frames_count, W*H, 3] format, assume all frames has the same resolution with W, H\
-    # TODO: specify this function to generate "mask" autoly from the input images (assmues the image is masked)
     frames_count = len(imgs)
     rays_o_all, rays_v_all, rays_gt_all, rays_mask_all = [], [], [], []
     for i in range(0, frames_count):
@@ -96,16 +95,20 @@ class HonkaiStart(torch.nn.Module):
             reg_data = json.load(json_file)
         self.objects_cnt = reg_data['objects_cnt']
         self.train_iters = reg_data['train_iters']
-        self.raw_translation = torch.tensor([0, 0, 0], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
-        self.raw_quaternion = torch.tensor([1, 0, 0, 0], dtype=torch.float32, requires_grad=True) # 
-        # TODO finish init setting 
-        self.objects, object_masks = []
+        self.batch_size = reg_data['batch_size']
+        self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
+        self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
+        self.objects, self.obj_masks = [], []
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
             current_obj_name = reg_data['obj_confs'][current_name + "_name"]
+            current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
             # pack this neus as a exp_runner in neus
-            self.objects.append(Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True))
+            self.objects.append(current_exp_runner)
+            current_mask = torch.sum(current_exp_runner.dataset.images, dim=-1)
+            current_mask = (current_mask == 0) # [n_images, H, W, 3]
+            self.obj_masks.append(current_mask)
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -125,49 +128,83 @@ class HonkaiStart(torch.nn.Module):
         sdf_grad = self.runner_background.sdf_network.gradient(pts).squeeze().contiguous()
         return sdf, sdf_grad
     
-    def generate_samples(self, standard_index, to_aligin_index, samples_num = 10000, is_random=False): # generate random rays from the rays all, with rays_gt and rays_o, rays_d
-        # assume this pose 
-        # TODO: generate random rays from rays all within the mask 
+    # TODO: need with torch.no_grad here? 
+    def generate_samples(self, source_index, image_index, samples_num = 10000, is_random=False): 
+        # generate random rays from the rays all, with rays_gt and rays_o, rays_d
+        # assume this is generated within mask, and is the inter-section of the target 
         if is_random:
+        # TODO: generate random rays from rays all within the mask 
             random_indexes = torch.randint(low=0, high=self.W, size=[samples_num]) # reflect this indexes to rays_all
             return None
-        else:
-            return None
+        else: # generate all rays within the mask for the specified image_index
+            tmp_dataset = self.objects[source_index].dataset # 
+            H, W = tmp_dataset.H, tmp_dataset.W
+            K, M = tmp_dataset.intrinsics_all[image_index], tmp_dataset.pose_all[image_index]
+            rays_o, rays_v = generate_rays_with_K_and_M(transform_matrix=M, intrinsic_mat=K, W=W, H=H) # [H, W, 1] same as neus format
+            rays_gt = tmp_dataset.images[image_index].to(self.device)
+            return rays_o, rays_v, rays_gt # all should in cuda device
             # generate full rays in this pose 
-        
+            
+            
+    def calc_equivalent_camera_position(self, R, T, camera_c2w):
+        with torch.no_grad():
+            _, transform_matrix_inv = self.get_transform_matrix(quaternion=R, translation=T)
+            calc_equ_c2w = torch.matmul(transform_matrix_inv, camera_c2w)
+            return calc_equ_c2w
+    
     def refine_rt_forward(self, standard_index = 0, to_aligin_index = 1): # refine the rt from to_aligin_index to standard_index
         # raw_quad, raw_trans are set from the init or the optimizer
         # TODO select poses to make sure it is generate from a both-available area
-        
+        images_total = len(self.obj_masks[standard_index])
+        print_info("running with ", images_total, "in total")
         global_loss = 0
-        rays_gt, rays_o, rays_d = self.generate_samples() 
-        rays_sum = len(rays_o)            
+        neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
+        for image_index in range(0, images_total):
+            # calc both equv z < 0, assumes in standard it is > 0, so only care about the equv in to_aligin_index
+            orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
+            pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
+            # print_info("calc eqv z ", pre_calc_c2w[2, 3])
+            if pre_calc_c2w[2, 3] > 0: # in both avaible area, start reg
+                print_info("Running at image ", image_index, "with equ z > 0")
+                rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
+                rays_mask = self.obj_masks[standard_index][image_index]
+                 # reshape is used for after mask, it become [rays_sum*3]
+                rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3) 
+                rays_sum = len(rays_o)  
+                # TODO: reformat this function to suit for two poses rendering
+                for rays_o_batch, rays_d_batch, rays_gt_batch in zip(rays_o.split(self.batch_size),rays_d.split(self.batch_size), rays_gt.split(self.batch_size)):
+                    near, far = neus_to_aligin.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)            
+                    background_rgb = None
+                    render_out = neus_to_aligin.renderer.render_dynamic(rays_o=rays_o_batch, rays_d=rays_d_batch,
+                                                                                near=near, far=far,
+                                                                                T=self.raw_translation, R=self.raw_quaternion,
+                                                                                camera_c2w=orgin_mat_c2w,
+                                                                                cos_anneal_ratio=neus_to_aligin.get_cos_anneal_ratio(),
+                                                                                background_rgb=background_rgb)
+                    color_fine = render_out["color_fine"]
+                    threshold = 0.005
+                    value = 1.0  # 大于阈值的元素将保持不变
+                    value_below_threshold = 0.0  # 小于等于阈值的元素将置为0
+                    color_fine_01 =  F.threshold(color_fine, threshold, value_below_threshold, value)
+                    rays_gt_01_batch = F.threshold(rays_gt_batch, threshold, value_below_threshold, value)
+                    # TODO: change into mask loss
+                    # TODO: add sdf loss if necessary
+                    mask_error = (color_fine_01 - rays_gt_01_batch)
+                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum / 3 # normalize within cnt 
+                    global_loss += mask_fine_loss.clone().detach()
+                    mask_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
+                    torch.cuda.synchronize()
+                    del render_out
+            else:
+                continue
             # count = 0
-        # TODO: reformat this function to suit for two poses rendering
-        for rays_o_batch, rays_d_batch, rays_gt_batch in zip(rays_o.split(self.batch_size),
-                                                            rays_d.split(self.batch_size),
-                                                            rays_gt.split(self.batch_size)):
-            near, far = self.runner_object.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)            
-            background_rgb = None
-            render_out = self.runner_object.renderer.render_dynamic(rays_o=rays_o_batch, rays_d=rays_d_batch,
-                                                                        near=near, far=far,
-                                                                        T=self.raw_translation, R=self.raw_quaternion,
-                                                                        camera_c2w=orgin_mat_c2w,
-                                                                        cos_anneal_ratio=self.runner_object.get_cos_anneal_ratio(),
-                                                                        background_rgb=background_rgb)
-            color_fine = render_out["color_fine"]
-            color_error = (color_fine - rays_gt_batch)
-            color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error),reduction='sum') / rays_sum  # normalize
-            global_loss += color_fine_loss.clone().detach()
-            color_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
-            torch.cuda.synchronize()
-            del render_out
+            print_info("acced loss at this index ", global_loss)
         R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
         print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
         R_ek_loss.backward(retain_graph=True)
         global_loss = R_ek_loss + global_loss
                 
-        return
+        return global_loss
     
     
 def get_optimizer(mode, honkaiStart):
@@ -190,9 +227,8 @@ def refine_rt(honkaiStart : HonkaiStart, train_iters=10000): # runs as a train f
                 os.makedirs(vis_folder)
         loss = honkaiStart.refine_rt_forward()
         return loss   
-    
+    optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     pbar = trange(0, train_iters)
-    
     for i in pbar:
         loss = refine_rt_forward(optimizer=optimizer, vis_folder=Path('refine_rt'), iter_id=i)
         if loss.norm() < 1e-3:
@@ -215,6 +251,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     refine_rt(honkaiStart=honkaiStart)
+
+"""
+python reg.py --conf ./confs/json/march7th.json --gpu 3
+
+"""
     

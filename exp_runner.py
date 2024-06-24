@@ -565,7 +565,7 @@ class Runner:
 
 
 if __name__ == '__main__':
-    print('Genshin Nerf, start!!!')
+    print('Honkai NerF, start!!!')
 
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     # torch.cuda.set_device(args.gpu)
