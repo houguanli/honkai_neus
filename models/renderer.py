@@ -393,6 +393,7 @@ class NeuSRenderer:
     # this funtion is written for dynamic rendering
     # better to use R-T transform when rendering a single ray, make easier to adapt in the future
     # rays_gt = rays ground truth [batch_size, 3], infering the ground truth RGB.
+    # differ from genshin neus, we "lock" the camera with the obj, so obj1 with RT trans 2 obj2, means camera with the same RT
     def render_dynamic(self, rays_o, rays_d, near, far, R, T, camera_c2w, perturb_overwrite=-1, background_rgb=None,
                        additional_transform = None, cos_anneal_ratio=0.0):
         # apply R to rays_d and T to rays_o, requires grad here
@@ -415,13 +416,14 @@ class NeuSRenderer:
         transform_matrix[3, 3] = 1.0
         if additional_transform is not None: # now rendering with addtional pose
             transform_matrix = torch.matmul(transform_matrix, additional_transform)
-        transform_matrix_inv = torch.inverse(transform_matrix)  # make an inverse
+        
+        # transform_matrix_inv = torch.inverse(transform_matrix)  # make an inverse
         # rotate_mat = transform_matrix_inv[:3, :3]
         # rotate_mat = torch.inverse(rotate_mat)
         # T1_expand = (transform_matrix[0:3, 3]).repeat(batch_size, 1)  # expand the trans, rays_o = 
         # rays_d = torch.matmul(rotate_mat[None, :3, :3], rays_d[:, :, None]).squeeze()  # batch_size, 3
-        camera_pos = torch.matmul(transform_matrix_inv, camera_c2w)
-        rays_d = torch.matmul(transform_matrix_inv[None, :3, :3], rays_d[:, :, None]).squeeze(dim=-1)  # W, H, 3
+        camera_pos = torch.matmul(transform_matrix, camera_c2w)
+        rays_d = torch.matmul(transform_matrix[None, :3, :3], rays_d[:, :, None]).squeeze(dim=-1)  # W, H, 3
         # print(rays_d.shape)
         # rays_o = torch.matmul(camera_pos[None, :3, :3], rays_o[:, :, None]).squeeze()  # batch_size, 3
         # rays_o = rays_o + T1_expand  # batch_size 3, R1*T0 + T1

@@ -98,7 +98,7 @@ class HonkaiStart(torch.nn.Module):
         self.batch_size = reg_data['batch_size']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
-        self.objects, self.obj_masks = [], []
+        self.objects, self.obj_masks, self.obj_names = [], [], []
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
@@ -109,6 +109,7 @@ class HonkaiStart(torch.nn.Module):
             current_mask = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_mask == 0) # [n_images, H, W, 3]
             self.obj_masks.append(current_mask)
+            self.obj_names.append(current_obj_name)
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -148,11 +149,11 @@ class HonkaiStart(torch.nn.Module):
             
     def calc_equivalent_camera_position(self, R, T, camera_c2w):
         with torch.no_grad():
-            _, transform_matrix_inv = self.get_transform_matrix(quaternion=R, translation=T)
-            calc_equ_c2w = torch.matmul(transform_matrix_inv, camera_c2w)
+            transform_matrix, transform_matrix_inv = self.get_transform_matrix(quaternion=R, translation=T)
+            calc_equ_c2w = torch.matmul(transform_matrix, camera_c2w)
             return calc_equ_c2w
     
-    def refine_rt_forward(self, standard_index = 0, to_aligin_index = 1): # refine the rt from to_aligin_index to standard_index
+    def refine_rt_forward(self, standard_index = 0, to_aligin_index = 1, vis_folder=None, write_debug=False, iter_id = 0): # refine the rt from to_aligin_index to standard_index
         # raw_quad, raw_trans are set from the init or the optimizer
         # TODO select poses to make sure it is generate from a both-available area
         images_total = len(self.obj_masks[standard_index])
@@ -187,7 +188,6 @@ class HonkaiStart(torch.nn.Module):
                     value_below_threshold = 0.0  # 小于等于阈值的元素将置为0
                     color_fine_01 =  F.threshold(color_fine, threshold, value_below_threshold, value)
                     rays_gt_01_batch = F.threshold(rays_gt_batch, threshold, value_below_threshold, value)
-                    # TODO: change into mask loss
                     # TODO: add sdf loss if necessary
                     mask_error = (color_fine_01 - rays_gt_01_batch)
                     mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum / 3 # normalize within cnt 
@@ -195,6 +195,16 @@ class HonkaiStart(torch.nn.Module):
                     mask_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
                     torch.cuda.synchronize()
                     del render_out
+                if write_debug and vis_folder is not None:
+                    # import pdb; pdb.set_trace();
+                    debug_out_rgb = neus_to_aligin.render_novel_image_with_RTKM(q = self.raw_quaternion.detach().cpu().numpy(), t = self.raw_translation.detach().cpu().numpy(),
+                            post_fix=image_index,  return_render_out=True, intrinsic_mat=neus_standard.dataset.intrinsics_all[image_index].detach().cpu().numpy(),
+                            original_mat=orgin_mat_c2w.detach().cpu().numpy(), img_W=neus_to_aligin.dataset.W, img_H=neus_to_aligin.dataset.H, resolution_level=5)
+                    # debug_path = vis_folder + "/" +  self.obj_names[to_aligin_index] + "_" + str(image_index) + ".png" # vis_folder is a path item
+                    debug_path = vis_folder / str(iter_id) # vis_folder is a path item
+                    if not debug_path.exists():
+                        os.makedirs(debug_path)
+                    cv.imwrite((str(debug_path) + "/" +  self.obj_names[to_aligin_index] + "_" + str(image_index) + ".png" ), debug_out_rgb)
             else:
                 continue
             # count = 0
@@ -219,18 +229,19 @@ def get_optimizer(mode, honkaiStart):
         )
     return optimizer
 
-def refine_rt(honkaiStart : HonkaiStart, train_iters=10000): # runs as a train function 
-    def refine_rt_forward(optimizer, vis_folder= None, iter_id=-1):
+def refine_rt(honkaiStart : HonkaiStart, vis_folder=None): # runs as a train function 
+    def refine_rt_forward(optimizer, iter_id=-1):
         optimizer.zero_grad()
         if vis_folder != None:
             if not os.path.exists(vis_folder):
                 os.makedirs(vis_folder)
-        loss = honkaiStart.refine_rt_forward()
+        loss = honkaiStart.refine_rt_forward(vis_folder=vis_folder, write_debug=True, iter_id = iter_id)
         return loss   
     optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
+    train_iters = honkaiStart.train_iters
     pbar = trange(0, train_iters)
     for i in pbar:
-        loss = refine_rt_forward(optimizer=optimizer, vis_folder=Path('refine_rt'), iter_id=i)
+        loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
         if loss.norm() < 1e-3:
             break
         optimizer.step()    
@@ -251,10 +262,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "stand2lie"))
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 3
-
+python reg.py --conf ./confs/json/fuxuan.json --gpu 0
+python reg.py --conf ./confs/json/dragon.json --gpu 0
 """
     

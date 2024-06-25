@@ -533,10 +533,10 @@ class Runner:
         transform_matrix[0:3, 0:3] = rotate_mat
         transform_matrix[0:3, 3] = t
         transform_matrix[3, 3] = 1.0
-        inverse_matrix = np.linalg.inv(transform_matrix)
+        # inverse_matrix = np.linalg.inv(transform_matrix)
         intrinsic_inv = torch.from_numpy(np.linalg.inv(intrinsic_mat).astype(np.float32)).cuda()
         camera_pose = np.array(original_mat)
-        transform_matrix = inverse_matrix @ camera_pose
+        transform_matrix = transform_matrix @ camera_pose
         # transform_matrix = np.array([
         #     [0.0433,   0.0397, -0.9953,  0.8153],
         #     [ 0.9944,  -0.0608,  0.0418,  0.1112],
@@ -545,7 +545,7 @@ class Runner:
         # ]) # tmp
         self.dataset.W = img_W
         self.dataset.H = img_H
-        print("equivalent c2w mat: \n", transform_matrix)
+        # print("equivalent c2w mat: \n", transform_matrix)
         # transform_matrix =transform_matrix.astype(np.float32).cuda()
         img, normal = self.render_novel_image_at(transform_matrix, resolution_level=resolution_level, intrinsic_inv=intrinsic_inv)
         # img loss
