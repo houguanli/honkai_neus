@@ -213,9 +213,7 @@ class HonkaiStart(torch.nn.Module):
         print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
         R_ek_loss.backward(retain_graph=True)
         global_loss = R_ek_loss + global_loss
-                
         return global_loss
-    
     
 def get_optimizer(mode, honkaiStart):
     optimizer = None

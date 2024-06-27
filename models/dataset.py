@@ -30,8 +30,8 @@ def load_K_Rt_from_P(filename, P=None):
     pose = np.eye(4, dtype=np.float32)
     pose[:3, :3] = R.transpose()
     pose[:3, 3] = (t[:3] / t[3])[:, 0]
-    # print("calc intriscics ") 
-    # print(intrinsics)
+    # print("calc pose ") 
+    # print(pose)
     return intrinsics, pose
 
 
@@ -81,6 +81,7 @@ class Dataset:
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
         self.pose_all = torch.stack(self.pose_all).to(self.device)  # [n_images, 4, 4]
+        # import pdb; pdb.set_trace()
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
 
@@ -183,8 +184,9 @@ class Dataset:
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3
 
 
-    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1, intrinsic_inv=None):
-        transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to(self.device)
+    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1, intrinsic_inv=None, is_np=True): # default c2w is from np
+        if is_np:
+            transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to(self.device)
         if intrinsic_inv is None:
             intrinsic_inv = self.intrinsics_all_inv[0]
         # transform_matrix.cuda()  # add to cuda

@@ -17,6 +17,8 @@ from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, N
 from models.renderer import NeuSRenderer
 from models.common import * 
 import json
+import open3d as o3d
+from pathlib import Path
 
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False):
@@ -28,7 +30,7 @@ class Runner:
         conf_text = f.read()
         conf_text = conf_text.replace('CASE_NAME', case)
         f.close()
-
+        self.name = case
         self.conf = ConfigFactory.parse_string(conf_text)
         self.conf['dataset.data_dir'] = self.conf['dataset.data_dir'].replace('CASE_NAME', case)
         self.base_exp_dir = self.conf['general.base_exp_dir']
@@ -348,15 +350,11 @@ class Runner:
 
     def render_novel_image_at(self, camera_pose, resolution_level, intrinsic_inv=None):
         rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv)
-        
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
-        # import pdb; pdb.set_trace()
-        
         out_rgb_fine = []
         normal_fine = []
-        n_samples = self.renderer.n_samples + self.renderer.n_importance
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
             background_rgb = torch.zeros([1, 3]) if self.use_white_bkgd else None
@@ -368,11 +366,45 @@ class Runner:
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
             out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
-            # normal_fine.append((render_out['gradients'] * render_out['weights'][:, :n_samples, None])).detach().cpu().numpy()
             del render_out
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine, normal_fine
-
+    
+    def render_depth_image_at(self, camera_pose, resolution_level, intrinsic_inv=None): # TODO: to be finished
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_pose, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv)
+        H, W, _ = rays_o.shape
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+        out_depth_fine = []
+        return 
+    
+    # this function generate_zero_sdf_points from images.  Return an numpy for better 
+    def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0):
+        depths, sdfs = torch.zeros(len(rays_o), dtype=torch.float32), torch.ones(len(rays_o), dtype=torch.float32)
+        rays_mask, zero_mask, inf_mask =  torch.ones((len(rays_o)), dtype=torch.bool), \
+            torch.ones((len(rays_o)), dtype=torch.bool), torch.ones((len(rays_o)), dtype=torch.bool) 
+        rays_o = rays_o.clone() # VERY important
+# this is a calculation using progressive photon mapping to calculate depth for each single ray, upper is its refinement , 
+# using batch calculation to accelerate the program with only one while logic term.original code please to refer to 
+# genshin_nerf render_depth_core. Now depth is the points from rays_o to surface as the dir is rays_d. however, need to remove outer ones       
+        while torch.sum(rays_mask) > 0:
+            pts, dirs = rays_o[rays_mask], rays_d[rays_mask]
+            tmp_sdfs =  self.sdf_network.sdf(pts).contiguous().squeeze()
+            pts = pts + dirs * (tmp_sdfs.repeat(3, 1).T)
+            rays_o[rays_mask] = pts # update current_rays
+            depths[rays_mask] = depths[rays_mask] + tmp_sdfs
+            sdfs[rays_mask] = tmp_sdfs
+            zero_mask, inf_mask = sdfs < zero_sdf_thereshold, sdfs > inf_depth_thereshold #must be sdfs be
+            rays_mask = zero_mask + inf_mask
+            rays_mask = ~rays_mask
+        # print(sdfs)
+        zero_points = None
+        if torch.sum(zero_mask) > 0: # have legeal depth value
+            # import pdb; pdb.set_trace();
+            # masked_depths = 
+            zero_points = rays_o[zero_mask] + depths[zero_mask][:, None] * rays_d[zero_mask] # only consider the points that reaching the zero thereshold 
+        return zero_points        
+    
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
@@ -409,60 +441,53 @@ class Runner:
         for image in images:
             writer.write(image)
         writer.release()
-
-    def save_render_pic_at(self, setting_json_path):
-        img = self.render_novel_image_at(camera_pose, 2)
-        set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
-        file_name_with_extension = os.path.basename(setting_json_path)
-        case_name, file_extension = os.path.splitext(file_name_with_extension)
-        render_path = set_dir + "/" + case_name + ".png"
-        print("Saving render img at " + render_path)
-        cv.imwrite(render_path, img)
-
-    def render_motion(self, setting_json_path):
-        with open(setting_json_path, "r") as json_file:
-            motion_data = json.load(json_file)
-        if motion_data["frames"] is None:
-            print_error("must provide a sequence of motion information")
-            exit()
-        frames = motion_data["frames"]
-        print_info(f"{frames} frames will be rendered.")
-        motion_transforms = motion_data["results"]
-        original_mat = motion_data["1_1_M"]
-        if original_mat == None:
-            print_error("static camera information must be provided")
-        for i in tqdm(range(1)):
-            motion_transform = motion_transforms[i]
-            assert i == motion_transform["frame_id"], "invalid frame sequence"
-            t, q = motion_transform['translation'], motion_transform['rotation'],
-            q = [0.9515, 0.1449, 0.2685, 0.0381]
-            t = [0000, 0.0000, 0.8659]
-            w, x, y, z = q
-            rotate_mat = np.array([
-                [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                [2 * (x * y + z * w), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - x * w)],
-                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x ** 2 + y ** 2)]
-            ])
-            transform_matrix = np.zeros((4, 4))
-            transform_matrix[0:3, 0:3] = rotate_mat
-            transform_matrix[0:3, 3] = t
-            transform_matrix[3, 3] = 1.0
-            inverse_matrix = np.linalg.inv(transform_matrix)
-            camera_pose = np.array(original_mat)
-
-            img = self.render_novel_image_at(camera_pose, 2)
-            # img loss
-            set_dir, file_name_with_extension = os.path.dirname(setting_json_path), os.path.basename(setting_json_path)
-            file_name_with_extension = os.path.basename(setting_json_path)
-            case_name, file_extension = os.path.splitext(file_name_with_extension)
-            render_path = f"{set_dir}/test_render_motion{i:04d}.png"
-            print("Saving render img at " + render_path)
-            cv.imwrite(render_path, img)
-            print_info(f"finish rendering frame:{i}")
-
-        print_ok(f"{frames} images has been rendered!")
-
-    def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None, img_W=800, img_H=600, return_render_out=False, resolution_level=1):
+        
+    def generate_and_save_points_ply_single(self, store_path=None, image_index=0, resolution_level=1, write_out_flag=True):
+        if store_path is None:
+            store_dir = Path("debug", "zero_points_test")
+            if not os.path.exists(store_dir):
+                os.makedirs(store_dir)
+            store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
+        camera_c2w, intrinsic_inv = self.dataset.pose_all[image_index].clone(), self.dataset.intrinsics_all_inv[image_index].clone()
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_c2w, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv, is_np=False)
+        rays_o = rays_o.reshape(-1, 3).requires_grad_(False)
+        rays_d = rays_d.reshape(-1, 3).requires_grad_(False)
+        rays_sum, process_flag = len(rays_o), 0
+        zero_points_all = np.empty((0,3))
+        for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size), rays_d.split(self.batch_size)):
+            # with torch.no_grad():
+            zero_points = self.generate_zero_sdf_points(rays_o=rays_o_batch, rays_d=rays_d_batch)
+            if zero_points is None:
+                continue
+            zero_points = zero_points.detach().cpu().numpy()
+            zero_points_all = np.concatenate((zero_points_all, zero_points), axis=0) # contact results
+            del zero_points
+            process_flag += self.batch_size
+            # print("calculating rays ", process_flag, "with total ", rays_sum)
+        if write_out_flag:
+            point_cloud = o3d.geometry.PointCloud()
+            point_cloud.points = o3d.utility.Vector3dVector(zero_points_all)
+            o3d.io.write_point_cloud(store_path, point_cloud)
+        return zero_points_all
+    
+    def generate_zero_points_full(self, store_dir=None):
+        if store_dir is None:
+            store_dir = store_dir = Path("debug", "zero_points_test")
+        if not os.path.exists(store_dir):
+            os.makedirs(store_dir)
+        singe_points_full = np.empty((0, 3))
+        for image_index in range(0, len(self.dataset.images)):
+            store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
+            # generate this for every image
+            singe_points_full_single_image = self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1) 
+            singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
+        point_cloud = o3d.geometry.PointCloud() # auto write out
+        store_path = store_dir + "/full.ply"
+        point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
+        o3d.io.write_point_cloud(store_path, point_cloud)
+        
+    def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None,
+                                     img_W=800, img_H=600, return_render_out=False, resolution_level=1):
         if q is None or t is None:
             q, t = [1, 0, 0, 0], [0, 0, 0] # this is a default setting
             # q = [0, 0, 1, 0] 
@@ -589,14 +614,10 @@ if __name__ == '__main__':
         runner.train()
     elif args.mode == 'validate_mesh':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
-    elif args.mode == 'render_at':
-        runner.save_render_pic_at(args.render_at_pose_path)
     elif args.mode == 'validate_image':
         runner.validate_image()
-    elif args.mode == 'render_motion':
-        runner.render_motion(args.render_at_pose_path)
-    elif args.mode == 'train_dynamic':
-        runner.train_dynamic_single_frame(args.render_at_pose_path)
+    elif args.mode == 'generate_points':
+        runner.generate_zero_points_full()
     elif args.mode == 'render_rtkm':
         runner.render_novel_image_with_RTKM(post_fix=args.post_fix, resolution_level=args.resolution_level)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
@@ -608,19 +629,10 @@ if __name__ == '__main__':
 """
 conda activate neus
 cd D:/gitwork/NeuS
-python exp_runner.py --mode train_dynamic --conf ./confs/wmask.conf --case bird --is_continue --render_at_pose_path D:/gitwork/genshinnerf/dynamic_test/train_dynamic_setting.json
 python exp_runner.py --mode validate_mesh --conf ./confs/thin_structure.conf --case scene1 --is_continue --gpu 4
-python exp_runner.py --mode render_rtkm --conf ./confs/wmask_blender_bunny.conf --case bunny_original --is_continue
 python exp_runner.py --mode validate_image --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
-python exp_runner.py --mode validate_image --conf ./confs/thin_structure.conf --case scene1 --is_continue --gpu 4
 python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
 python exp_runner.py --mode train --conf ./confs/thin_structure_white_bkgd.conf --case bunny2
 python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case tree
-python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure.conf --case yoyo --is_continue --gpu 2 --post_fix 1
-python exp_runner.py --mode render_rtkm --conf ./confs/small_structure_white_bkgd.conf --case yoyoball --is_continue --gpu 2 --post_fix 6
-python exp_runner.py --mode render_rtkm --conf ./confs/tree_structure_white_bkgd.conf --case tree_original --is_continue --post_fix 0 --resolution_level 6
-python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap1_merge --is_continue --gpu 3 --post_fix _ --resolution_level 6
-python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 2 --post_fix 0 --resolution_level 6
-python exp_runner.py --mode render_rtkm --conf ./confs/small_structure_white_bkgd.conf --case yoyo_original_man_min --is_continue --post_fix 0 --resolution_level 6
-python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case dragon_pos2_delta --is_continue --post_fix 0 --resolution_level 6
+python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 2 --case bunny_stand
 """
