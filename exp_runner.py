@@ -400,9 +400,10 @@ class Runner:
         # print(sdfs)
         zero_points = None
         if torch.sum(zero_mask) > 0: # have legeal depth value
+            zero_points = rays_o[zero_mask] # below is wrong because rayso is updated ! 
             # import pdb; pdb.set_trace();
             # masked_depths = 
-            zero_points = rays_o[zero_mask] + depths[zero_mask][:, None] * rays_d[zero_mask] # only consider the points that reaching the zero thereshold 
+            # zero_points = rays_o[zero_mask] + rays_d[zero_mask] * (depths[zero_mask].repeat(3, 1).T)# only consider the points that reaching the zero thereshold 
         return zero_points        
     
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
@@ -482,7 +483,7 @@ class Runner:
             singe_points_full_single_image = self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1) 
             singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
         point_cloud = o3d.geometry.PointCloud() # auto write out
-        store_path = store_dir + "/full.ply"
+        store_path = str(store_dir) + "/full.ply"
         point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
         o3d.io.write_point_cloud(store_path, point_cloud)
         
