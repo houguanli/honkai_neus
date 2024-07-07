@@ -1,6 +1,6 @@
 {
     "device": "cuda",
-    "train_iters": 100,
+    "train_iters": 200,
     "objects_cnt": 2,
     "batch_size": 512,
     "obj_confs": {
@@ -10,6 +10,7 @@
         "1_name": "bunny_lie"
     },
     "raw_translation": [-0.32199525,  0.16299613,  0.3357338],
-    "raw_quaternion": [0.4736984355265714 , -0.21672384641841186 , 0.7409593713558119 , -0.4238157308482185]
-
+    "raw_quaternion": [0.4736984355265714 , -0.21672384641841186 , 0.7409593713558119 , -0.4238157308482185],
+    "standard_index" : 0,
+    "to_aligin_index": 1
 }

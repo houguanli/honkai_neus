@@ -96,6 +96,8 @@ class HonkaiStart(torch.nn.Module):
         self.objects_cnt = reg_data['objects_cnt']
         self.train_iters = reg_data['train_iters']
         self.batch_size = reg_data['batch_size']
+        self.standard_index = reg_data['standard_index']
+        self.to_aligin_index = reg_data['to_aligin_index']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
         self.objects, self.obj_masks, self.obj_names = [], [], []
@@ -146,21 +148,22 @@ class HonkaiStart(torch.nn.Module):
             return rays_o, rays_v, rays_gt # all should in cuda device
             # generate full rays in this pose 
             
-            
     def calc_equivalent_camera_position(self, R, T, camera_c2w):
         with torch.no_grad():
             transform_matrix, transform_matrix_inv = self.get_transform_matrix(quaternion=R, translation=T)
             calc_equ_c2w = torch.matmul(transform_matrix, camera_c2w)
             return calc_equ_c2w
     
-    def refine_rt_forward(self, standard_index = 0, to_aligin_index = 1, vis_folder=None, write_debug=False, iter_id = 0): # refine the rt from to_aligin_index to standard_index
+    def refine_rt_forward(self, standard_index, to_aligin_index, vis_folder=None, write_debug=False, iter_id = 0, 
+                          images_total = -1, start_index=0, single_image_refine=False): # refine the rt from to_aligin_index to standard_index
         # raw_quad, raw_trans are set from the init or the optimizer
-        # TODO select poses to make sure it is generate from a both-available area
-        images_total = len(self.obj_masks[standard_index])
+        # TODO:: select poses to make sure it is generate from a both-available area
+        if images_total < 0:
+            images_total = len(self.obj_masks[standard_index]) # as default
         print_info("running with ", images_total, "in total")
         global_loss = 0
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
-        for image_index in range(0, images_total):
+        for image_index in range(start_index, start_index + images_total):
             # calc both equv z < 0, assumes in standard it is > 0, so only care about the equv in to_aligin_index
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
             pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
@@ -190,7 +193,7 @@ class HonkaiStart(torch.nn.Module):
                     rays_gt_01_batch = F.threshold(rays_gt_batch, threshold, value_below_threshold, value)
                     # TODO: add sdf loss if necessary
                     mask_error = (color_fine_01 - rays_gt_01_batch)
-                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum / 3 # normalize within cnt 
+                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum  # normalize within cnt 
                     global_loss += mask_fine_loss.clone().detach()
                     mask_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
                     torch.cuda.synchronize()
@@ -208,7 +211,15 @@ class HonkaiStart(torch.nn.Module):
             else:
                 continue
             # count = 0
-            print_info("acced loss at this index ", global_loss)
+            if single_image_refine:
+                print_info("acced loss at this index ", image_index, " ", global_loss)
+            else:
+                print_info("calc loss at this index ", image_index, " ", global_loss, "and return immediately")
+                R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
+                print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
+                R_ek_loss.backward(retain_graph=True)
+                global_loss = R_ek_loss + global_loss
+                return global_loss # return to optimize single
         R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
         print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
         R_ek_loss.backward(retain_graph=True)
@@ -227,20 +238,30 @@ def get_optimizer(mode, honkaiStart):
         )
     return optimizer
 
-def refine_rt(honkaiStart : HonkaiStart, vis_folder=None): # runs as a train function 
-    def refine_rt_forward(optimizer, iter_id=-1):
+def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False): # runs as a train function 
+    def refine_rt_forward(optimizer, iter_id=-1, start_index=-1):
         optimizer.zero_grad()
         if vis_folder != None:
             if not os.path.exists(vis_folder):
                 os.makedirs(vis_folder)
-        loss = honkaiStart.refine_rt_forward(vis_folder=vis_folder, write_debug=True, iter_id = iter_id)
+        if single_image_refine: # calc single image before refine
+            loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
+            vis_folder=vis_folder, write_debug=True, iter_id = iter_id, single_image_refine=single_image_refine, images_total=1, start_index=start_index)
+        else: # calc all images before refine
+            loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
+                vis_folder=vis_folder, write_debug=True, iter_id = iter_id)
         return loss   
     optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     train_iters = honkaiStart.train_iters
     pbar = trange(0, train_iters)
+    img_len = len(honkaiStart.objects[honkaiStart.standard_index].dataset.images)
     for i in pbar:
-        loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
-        if loss.norm() < 1e-3:
+        if single_image_refine: 
+            loss = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
+        else:
+            loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
+        if loss.norm() < 1e-6:
+            print_info("REG finished with loss ", loss.norm)
             break
         optimizer.step()    
         print("refining RAW_rt from pose 0 to pose 1")
@@ -260,7 +281,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "stand2lie"))
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "stand2lie"), single_image_refine=True)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 3

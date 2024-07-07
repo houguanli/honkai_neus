@@ -105,12 +105,8 @@ class Runner:
         image_perm = self.get_image_perm()
 
         for iter_i in tqdm(range(res_step)):
-            if self.dataset.focus_rays_in_mask:
-                rays_o, rays_d, true_rgb, mask = self.dataset.select_random_rays_in_masks(
-                    image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            else:
-                data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-                rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             # center = torch.Tensor([0.05, -0.1, 0]).cuda()
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
 
@@ -451,6 +447,9 @@ class Runner:
             store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
         camera_c2w, intrinsic_inv = self.dataset.pose_all[image_index].clone(), self.dataset.intrinsics_all_inv[image_index].clone()
         rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_c2w, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv, is_np=False)
+        # only bactchfy the rays in the mask
+        rays_mask = self.dataset.masks[image_index] > 0.1
+        rays_o, rays_d = rays_o[rays_mask], rays_d[rays_mask]
         rays_o = rays_o.reshape(-1, 3).requires_grad_(False)
         rays_d = rays_d.reshape(-1, 3).requires_grad_(False)
         rays_sum, process_flag = len(rays_o), 0
@@ -482,8 +481,9 @@ class Runner:
             # generate this for every image
             singe_points_full_single_image = self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1) 
             singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
+            print_blink("concatenated points generated from image " + str(image_index))
         point_cloud = o3d.geometry.PointCloud() # auto write out
-        store_path = str(store_dir) + "/full.ply"
+        store_path = str(store_dir) + "/" + self.name + "_full.ply"
         point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
         o3d.io.write_point_cloud(store_path, point_cloud)
         
