@@ -374,7 +374,7 @@ class Runner:
         out_depth_fine = []
         return 
     
-    # this function generate_zero_sdf_points from images.  Return an numpy for better 
+    # this function generate_zero_sdf_points from rays_o rays_d.
     def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0):
         depths, sdfs = torch.zeros(len(rays_o), dtype=torch.float32), torch.ones(len(rays_o), dtype=torch.float32)
         rays_mask, zero_mask, inf_mask =  torch.ones((len(rays_o)), dtype=torch.bool), \
@@ -397,10 +397,35 @@ class Runner:
         zero_points = None
         if torch.sum(zero_mask) > 0: # have legeal depth value
             zero_points = rays_o[zero_mask] # below is wrong because rayso is updated ! 
-            # import pdb; pdb.set_trace();
-            # masked_depths = 
             # zero_points = rays_o[zero_mask] + rays_d[zero_mask] * (depths[zero_mask].repeat(3, 1).T)# only consider the points that reaching the zero thereshold 
-        return zero_points        
+        return zero_points      # note it returns a torch tensor
+    
+    # this function 
+    def generate_zero_sdf_points_with_RT(self, rays_o, rays_d, q, t, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0): 
+        # expand as 4x4mat 
+        w, x, y, z = q
+        rotate_mat = torch.zeros((3, 3), device=rays_o.device)
+        rotate_mat[0, 0] = 1 - 2 * (y ** 2 + z ** 2)
+        rotate_mat[0, 1] = 2 * (x * y - z * w)
+        rotate_mat[0, 2] = 2 * (x * z + y * w)
+        rotate_mat[1, 0] = 2 * (x * y + z * w)
+        rotate_mat[1, 1] = 1 - 2 * (x ** 2 + z ** 2)
+        rotate_mat[1, 2] = 2 * (y * z - x * w)
+        rotate_mat[2, 0] = 2 * (x * z - y * w)
+        rotate_mat[2, 1] = 2 * (y * z + x * w)
+        rotate_mat[2, 2] = 1 - 2 * (x ** 2 + y ** 2)
+        transform_matrix = torch.zeros((4, 4), device=rays_o.device)
+        transform_matrix[0:3, 0:3] = rotate_mat
+        transform_matrix[0:3, 3] = t
+        transform_matrix[3, 3] = 1.0
+        rays_o = torch.matmul(transform_matrix[None, :3, :3], rays_o[:, :, None]).squeeze(dim=-1)  # W, H, 3
+        rays_o = rays_o + transform_matrix[None, :3, 3]
+        rays_d = torch.matmul(transform_matrix[None, :3, :3], rays_d[:, :, None]).squeeze(dim=-1)  # W, H, 3
+        # print(rays_d.shape)
+        # rays_o = torch.matmul(camera_pos[None, :3, :3], rays_o[:, :, None]).squeeze()  # batch_size, 3
+        # rays_o = rays_o + T1_expand  # batch_size 3, R1*T0 + T1
+        # print("equivalent c2w mat: \n", camera_pos.clone().detach().cpu())
+        return self.generate_zero_sdf_points(rays_o=rays_o, rays_d=rays_d, zero_sdf_thereshold=zero_sdf_thereshold, inf_depth_thereshold=inf_depth_thereshold)
     
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)

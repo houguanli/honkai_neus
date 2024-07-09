@@ -108,8 +108,8 @@ class HonkaiStart(torch.nn.Module):
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
-            current_mask = torch.sum(current_exp_runner.dataset.images, dim=-1)
-            current_mask = (current_mask == 0) # [n_images, H, W, 3]
+            current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
+            current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
         
@@ -160,7 +160,7 @@ class HonkaiStart(torch.nn.Module):
         # TODO:: select poses to make sure it is generate from a both-available area
         if images_total < 0:
             images_total = len(self.obj_masks[standard_index]) # as default
-        print_info("running with ", images_total, "in total")
+        # print_info("running with ", images_total, "in total")
         global_loss = 0
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
         for image_index in range(start_index, start_index + images_total):
@@ -169,7 +169,7 @@ class HonkaiStart(torch.nn.Module):
             pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
             # print_info("calc eqv z ", pre_calc_c2w[2, 3])
             if pre_calc_c2w[2, 3] > 0: # in both avaible area, start reg
-                print_info("Running at image ", image_index, "with equ z > 0")
+                # print_info("Running at image ", image_index, "with equ z > 0")
                 rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
                 rays_mask = self.obj_masks[standard_index][image_index]
                  # reshape is used for after mask, it become [rays_sum*3]
@@ -186,14 +186,17 @@ class HonkaiStart(torch.nn.Module):
                                                                                 cos_anneal_ratio=neus_to_aligin.get_cos_anneal_ratio(),
                                                                                 background_rgb=background_rgb)
                     color_fine = render_out["color_fine"]
-                    threshold = 0.005
-                    value = 1.0  # 大于阈值的元素将保持不变
-                    value_below_threshold = 0.0  # 小于等于阈值的元素将置为0
-                    color_fine_01 =  F.threshold(color_fine, threshold, value_below_threshold, value)
-                    rays_gt_01_batch = F.threshold(rays_gt_batch, threshold, value_below_threshold, value)
+                    threshold = 0.005  # below threshold value will be zeros, others will be ones
+                    color_fine_01 =  torch.sigmoid(color_fine - threshold)
+                    rays_gt_01_batch = torch.sigmoid(rays_gt_batch - threshold)
                     # TODO: add sdf loss if necessary
+                    # sdfs_point_rt = neus_to_aligin.generate_zero_sdf_points_with_RT(rays_o=rays_o_batch, rays_d=rays_d_batch, T=self.raw_translation, R=self.raw_quaternion) 
+                    # # query those points' sdfs in standard neus
+                    # neus_standard.sdf_network.sdf(sdfs_point_rt)
                     mask_error = (color_fine_01 - rays_gt_01_batch)
-                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum  # normalize within cnt 
+                    # import pdb; pdb.set_trace()
+                    # mask_fine_loss = F.l1_loss(color_fine_01, torch.ones_like(color_fine_01),reduction='sum') / rays_sum / 3 # normalize within cnt 
+                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum # normalize within cnt 
                     global_loss += mask_fine_loss.clone().detach()
                     mask_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
                     torch.cuda.synchronize()
@@ -212,16 +215,16 @@ class HonkaiStart(torch.nn.Module):
                 continue
             # count = 0
             if single_image_refine:
-                print_info("acced loss at this index ", image_index, " ", global_loss)
+                print_info("acced loss at image index ", image_index, " with 01 loss", global_loss)
             else:
-                print_info("calc loss at this index ", image_index, " ", global_loss, "and return immediately")
+                print_info("calc loss at this index ", image_index, " with 01 loss", global_loss, "and return immediately")
                 R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
-                print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
+                # print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
                 R_ek_loss.backward(retain_graph=True)
                 global_loss = R_ek_loss + global_loss
                 return global_loss # return to optimize single
         R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
-        print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
+        # print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
         R_ek_loss.backward(retain_graph=True)
         global_loss = R_ek_loss + global_loss
         return global_loss
@@ -238,7 +241,7 @@ def get_optimizer(mode, honkaiStart):
         )
     return optimizer
 
-def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False): # runs as a train function 
+def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False, single_sub_length=1): # runs as a train function 
     def refine_rt_forward(optimizer, iter_id=-1, start_index=-1):
         optimizer.zero_grad()
         if vis_folder != None:
@@ -257,15 +260,20 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
     img_len = len(honkaiStart.objects[honkaiStart.standard_index].dataset.images)
     for i in pbar:
         if single_image_refine: 
-            loss = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
+            for j in range (0, single_sub_length):
+                loss = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
+                optimizer.step()   
+                print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
+                
         else:
             loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
+            optimizer.step()    
+            print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
         if loss.norm() < 1e-6:
             print_info("REG finished with loss ", loss.norm)
             break
-        optimizer.step()    
-        print("refining RAW_rt from pose 0 to pose 1")
-        print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
+        # print("refining RAW_rt from pose 0 to pose 1")
+        # print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
     return
 
 
@@ -281,11 +289,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "stand2lie"), single_image_refine=True)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1"), single_image_refine=True)
 
 """
-python reg.py --conf ./confs/json/march7th.json --gpu 3
-python reg.py --conf ./confs/json/fuxuan.json --gpu 0
-python reg.py --conf ./confs/json/dragon.json --gpu 0
+python reg.py --conf ./confs/json/march7th.json --gpu 1
+python reg.py --conf ./confs/json/fuxuan.json --gpu 2
+python reg.py --conf ./confs/json/klee.json --gpu 3
 """
     
