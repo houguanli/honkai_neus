@@ -112,6 +112,8 @@ class HonkaiStart(torch.nn.Module):
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
+        self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
+        
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -154,7 +156,7 @@ class HonkaiStart(torch.nn.Module):
             calc_equ_c2w = torch.matmul(transform_matrix, camera_c2w)
             return calc_equ_c2w
     
-    def refine_rt_forward(self, standard_index, to_aligin_index, vis_folder=None, write_debug=False, iter_id = 0, 
+    def refine_rt_forward(self, standard_index, to_aligin_index, vis_folder=None, write_out="full", iter_id = 0, 
                           images_total = -1, start_index=0, single_image_refine=False): # refine the rt from to_aligin_index to standard_index
         # raw_quad, raw_trans are set from the init or the optimizer
         # TODO:: select poses to make sure it is generate from a both-available area
@@ -163,13 +165,14 @@ class HonkaiStart(torch.nn.Module):
         # print_info("running with ", images_total, "in total")
         global_loss = 0
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
+        debug_rgb = []
         for image_index in range(start_index, start_index + images_total):
             # calc both equv z < 0, assumes in standard it is > 0, so only care about the equv in to_aligin_index
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
             pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
             # print_info("calc eqv z ", pre_calc_c2w[2, 3])
             if pre_calc_c2w[2, 3] > 0: # in both avaible area, start reg
-                # print_info("Running at image ", image_index, "with equ z > 0")
+                print_info("Running at image ", image_index, "with equ z > 0 ", pre_calc_c2w[2, 3])
                 rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
                 rays_mask = self.obj_masks[standard_index][image_index]
                  # reshape is used for after mask, it become [rays_sum*3]
@@ -186,22 +189,25 @@ class HonkaiStart(torch.nn.Module):
                                                                                 cos_anneal_ratio=neus_to_aligin.get_cos_anneal_ratio(),
                                                                                 background_rgb=background_rgb)
                     color_fine = render_out["color_fine"]
+                    debug_rgb.append(color_fine.clone().detach().cpu().numpy())
                     threshold = 0.005  # below threshold value will be zeros, others will be ones
-                    color_fine_01 =  torch.sigmoid(color_fine - threshold)
-                    rays_gt_01_batch = torch.sigmoid(rays_gt_batch - threshold)
+                    color_fine_01 =    torch.sigmoid((color_fine - threshold) * 6480.0)
+                    rays_gt_01_batch = torch.sigmoid((rays_gt_batch - threshold) * 6480.0)
                     # TODO: add sdf loss if necessary
                     # sdfs_point_rt = neus_to_aligin.generate_zero_sdf_points_with_RT(rays_o=rays_o_batch, rays_d=rays_d_batch, T=self.raw_translation, R=self.raw_quaternion) 
                     # # query those points' sdfs in standard neus
                     # neus_standard.sdf_network.sdf(sdfs_point_rt)
+                    # mask_error = color_fine - rays_gt_batch
                     mask_error = (color_fine_01 - rays_gt_01_batch)
-                    # import pdb; pdb.set_trace()
                     # mask_fine_loss = F.l1_loss(color_fine_01, torch.ones_like(color_fine_01),reduction='sum') / rays_sum / 3 # normalize within cnt 
-                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum # normalize within cnt 
+                    mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum / 3.0 # normalize within cnt 
                     global_loss += mask_fine_loss.clone().detach()
-                    mask_fine_loss.backward(retain_graph=True)  # img_loss for refine R & T
+                    mask_fine_loss.backward()  # img_loss for refine R & T
                     torch.cuda.synchronize()
+                    # import pdb; pdb.set_trace()
+                    
                     del render_out
-                if write_debug and vis_folder is not None:
+                if write_out == "full" and vis_folder is not None:
                     # import pdb; pdb.set_trace();
                     debug_out_rgb = neus_to_aligin.render_novel_image_with_RTKM(q = self.raw_quaternion.detach().cpu().numpy(), t = self.raw_translation.detach().cpu().numpy(),
                             post_fix=image_index,  return_render_out=True, intrinsic_mat=neus_standard.dataset.intrinsics_all[image_index].detach().cpu().numpy(),
@@ -211,6 +217,27 @@ class HonkaiStart(torch.nn.Module):
                     if not debug_path.exists():
                         os.makedirs(debug_path)
                     cv.imwrite((str(debug_path) + "/" +  self.obj_names[to_aligin_index] + "_" + str(image_index) + ".png" ), debug_out_rgb)
+                elif write_out == "fast" and vis_folder is not None: # fast means only render in the mask, same as genshin_nerf 
+                    black_there_hold = 0
+                    W, H, cnt = self.W, self.H, 0
+                    debug_rgb = (np.concatenate(debug_rgb, axis=0).reshape(-1, 3) * 256).clip(0, 255).astype(np.uint8)
+                    debug_img = np.zeros([H, W, 3]).astype(np.uint8)
+                    for index in range(0, H):
+                        for j in range(0, W):
+                            if rays_mask[index][j]:
+                                if debug_rgb[cnt][0] > black_there_hold:
+                                    debug_img[index][j][0] = debug_rgb[cnt][0]
+                                    debug_img[index][j][1] = debug_rgb[cnt][1]
+                                    debug_img[index][j][2] = debug_rgb[cnt][2]
+                                else: # write unfitted rgb as white
+                                    debug_img[index][j][0] = 255
+                                    debug_img[index][j][1] = 255
+                                    debug_img[index][j][2] = 255                       
+                                cnt = cnt + 1
+                    print_blink("saving debug image at " + str(iter_id) + "th validation, with image inedex " + str(image_index))
+                    cv.imwrite((vis_folder / (str(iter_id) + "_" + str(image_index) + ".png")).as_posix(), debug_img)
+                else: 
+                    print("no debug output")
             else:
                 continue
             # count = 0
@@ -241,7 +268,7 @@ def get_optimizer(mode, honkaiStart):
         )
     return optimizer
 
-def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False, single_sub_length=1): # runs as a train function 
+def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False, single_sub_length=1, write_out=None): # runs as a train function 
     def refine_rt_forward(optimizer, iter_id=-1, start_index=-1):
         optimizer.zero_grad()
         if vis_folder != None:
@@ -249,10 +276,10 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
                 os.makedirs(vis_folder)
         if single_image_refine: # calc single image before refine
             loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
-            vis_folder=vis_folder, write_debug=True, iter_id = iter_id, single_image_refine=single_image_refine, images_total=1, start_index=start_index)
+            vis_folder=vis_folder, write_out=write_out, iter_id = iter_id, single_image_refine=single_image_refine, images_total=1, start_index=start_index)
         else: # calc all images before refine
             loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
-                vis_folder=vis_folder, write_debug=True, iter_id = iter_id)
+                vis_folder=vis_folder, write_out=write_out, iter_id = iter_id)
         return loss   
     optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     train_iters = honkaiStart.train_iters
@@ -263,7 +290,8 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
             for j in range (0, single_sub_length):
                 loss = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
                 optimizer.step()   
-                print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
+                print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))
+                print('trans gradient : {}, quad gradient : {}, loss: {}'.format(honkaiStart.raw_translation.grad, honkaiStart.raw_quaternion.grad, loss.norm()))   
                 
         else:
             loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
@@ -286,14 +314,16 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/json/base.json')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--write_out', type=str, default=0)
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1"), single_image_refine=True)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1"), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1
-python reg.py --conf ./confs/json/fuxuan.json --gpu 2
+python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
+python reg.py --conf ./confs/json/fuxuan_BEST.json --write_out fast --gpu 0
 python reg.py --conf ./confs/json/klee.json --gpu 3
 """
     
