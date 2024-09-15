@@ -171,7 +171,7 @@ class HonkaiStart(torch.nn.Module):
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
             pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
             # print_info("calc eqv z ", pre_calc_c2w[2, 3])
-            if pre_calc_c2w[2, 3] > 0: # in both avaible area, start reg
+            if pre_calc_c2w[2, 3] > 0.1: # in both avaible area, start reg
                 print_info("Running at image ", image_index, "with equ z > 0 ", pre_calc_c2w[2, 3])
                 rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
                 rays_mask = self.obj_masks[standard_index][image_index]
@@ -190,7 +190,7 @@ class HonkaiStart(torch.nn.Module):
                                                                                 background_rgb=background_rgb)
                     color_fine = render_out["color_fine"]
                     debug_rgb.append(color_fine.clone().detach().cpu().numpy())
-                    threshold = 0.005  # below threshold value will be zeros, others will be ones
+                    threshold = 0.001  # below threshold value will be zeros, others will be ones
                     color_fine_01 =    torch.sigmoid((color_fine - threshold) * 6480.0)
                     rays_gt_01_batch = torch.sigmoid((rays_gt_batch - threshold) * 6480.0)
                     # TODO: add sdf loss if necessary
@@ -318,7 +318,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1_thres1e-3"), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1
