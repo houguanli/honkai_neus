@@ -15,6 +15,7 @@ import trimesh
 from pathlib import Path
 import os
 import torch.nn as nn
+from AABB_helper import PointCloud2AABBTree
 
 def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_count, with_fixed_camera=False,
                             camera_params_list=None, pic_mode="png"):  # assmue load from a json file
@@ -87,6 +88,29 @@ def generate_all_rays(imgs, masks, cameras_K, cameras_c2w, W_all, H_all):
     # returns rays_o_all, rays_v_all, rays_gt_all, rays_mask_all formulate by frames
     return rays_o_all, rays_v_all, rays_gt_all, rays_mask_all
 
+def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"):
+    # convert to 4X4 mat
+    w, x, y, z = quaternion
+    rotate_mat = torch.zeros((3, 3), device=device)
+    rotate_mat[0, 0] = 1 - 2 * (y ** 2 + z ** 2)
+    rotate_mat[0, 1] = 2 * (x * y - z * w)
+    rotate_mat[0, 2] = 2 * (x * z + y * w)
+    rotate_mat[1, 0] = 2 * (x * y + z * w)
+    rotate_mat[1, 1] = 1 - 2 * (x ** 2 + z ** 2)
+    rotate_mat[1, 2] = 2 * (y * z - x * w)
+    rotate_mat[2, 0] = 2 * (x * z - y * w)
+    rotate_mat[2, 1] = 2 * (y * z + x * w)
+    rotate_mat[2, 2] = 1 - 2 * (x ** 2 + y ** 2)
+    transform_matrix = torch.zeros((4, 4), device=device)
+    transform_matrix[0:3, 0:3] = rotate_mat
+    transform_matrix[0:3, 3] = translation
+    transform_matrix[3, 3] = 1.0
+    ones_row = torch.ones(1, points.shape[1], dtype=points.dtype, device=points.device)
+    points_extended = torch.cat((points, ones_row), dim=0)
+    transfered_points = points_extended * transform_matrix
+    points_3d = transfered_points[:-1, :]
+    return points_3d
+    
 class HonkaiStart(torch.nn.Module):
     def __init__(self, setting_json_path):
         super(HonkaiStart, self).__init__()
@@ -100,20 +124,22 @@ class HonkaiStart(torch.nn.Module):
         self.to_aligin_index = reg_data['to_aligin_index']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
-        self.objects, self.obj_masks, self.obj_names = [], [], []
+        self.objects, self.obj_masks, self.obj_names, self.aabb_trees = [], [], [], []
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
             current_obj_name = reg_data['obj_confs'][current_name + "_name"]
+            current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
+            current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name)
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
+            self.aabb_trees.append(current_aabb_tree)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
-        
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -128,12 +154,10 @@ class HonkaiStart(torch.nn.Module):
         return transform_matrix, transform_matrix_inv
     
     def query_background_sdf(self, pts: torch.Tensor):
-        # return None, None
         sdf = self.runner_background.sdf_network.sdf(pts).contiguous()
         sdf_grad = self.runner_background.sdf_network.gradient(pts).squeeze().contiguous()
         return sdf, sdf_grad
     
-    # TODO: need with torch.no_grad here? 
     def generate_samples(self, source_index, image_index, samples_num = 10000, is_random=False): 
         # generate random rays from the rays all, with rays_gt and rays_o, rays_d
         # assume this is generated within mask, and is the inter-section of the target 
@@ -163,7 +187,7 @@ class HonkaiStart(torch.nn.Module):
         if images_total < 0:
             images_total = len(self.obj_masks[standard_index]) # as default
         # print_info("running with ", images_total, "in total")
-        global_loss = 0
+        global_loss, visited = 0, False
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
         debug_rgb = []
         for image_index in range(start_index, start_index + images_total):
@@ -171,7 +195,8 @@ class HonkaiStart(torch.nn.Module):
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
             pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
             # print_info("calc eqv z ", pre_calc_c2w[2, 3])
-            if pre_calc_c2w[2, 3] > 0.1: # in both avaible area, start reg
+            if pre_calc_c2w[2, 3] > 0.01: # in both avaible area, start reg
+                visited = True
                 print_info("Running at image ", image_index, "with equ z > 0 ", pre_calc_c2w[2, 3])
                 rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
                 rays_mask = self.obj_masks[standard_index][image_index]
@@ -247,14 +272,14 @@ class HonkaiStart(torch.nn.Module):
                 print_info("calc loss at this index ", image_index, " with 01 loss", global_loss, "and return immediately")
                 R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
                 # print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
-                R_ek_loss.backward(retain_graph=True)
+                R_ek_loss.backward()
                 global_loss = R_ek_loss + global_loss
                 return global_loss # return to optimize single
         R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
         # print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
-        R_ek_loss.backward(retain_graph=True)
+        R_ek_loss.backward()
         global_loss = R_ek_loss + global_loss
-        return global_loss
+        return global_loss, visited
     
 def get_optimizer(mode, honkaiStart):
     optimizer = None
@@ -275,29 +300,29 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
             if not os.path.exists(vis_folder):
                 os.makedirs(vis_folder)
         if single_image_refine: # calc single image before refine
-            loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
+            loss, visited = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
             vis_folder=vis_folder, write_out=write_out, iter_id = iter_id, single_image_refine=single_image_refine, images_total=1, start_index=start_index)
         else: # calc all images before refine
-            loss = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
+            loss, visited = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
                 vis_folder=vis_folder, write_out=write_out, iter_id = iter_id)
-        return loss   
+        return loss, visited   
     optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     train_iters = honkaiStart.train_iters
     pbar = trange(0, train_iters)
     img_len = len(honkaiStart.objects[honkaiStart.standard_index].dataset.images)
     for i in pbar:
         if single_image_refine: 
-            for j in range (0, single_sub_length):
-                loss = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
+            for _ in range (0, single_sub_length):
+                loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
                 optimizer.step()   
                 print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))
                 print('trans gradient : {}, quad gradient : {}, loss: {}'.format(honkaiStart.raw_translation.grad, honkaiStart.raw_quaternion.grad, loss.norm()))   
                 
         else:
-            loss = refine_rt_forward(optimizer=optimizer, iter_id=i)
+            loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i)
             optimizer.step()    
             print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
-        if loss.norm() < 1e-6:
+        if loss.norm() < 1e-6 and visited:
             print_info("REG finished with loss ", loss.norm)
             break
         # print("refining RAW_rt from pose 0 to pose 1")
@@ -318,12 +343,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1_thres1e-3"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "xbox_back2front"), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1
 python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
 python reg.py --conf ./confs/json/fuxuan_BEST.json --write_out fast --gpu 0
-python reg.py --conf ./confs/json/klee.json --gpu 3
+python reg.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 """
     

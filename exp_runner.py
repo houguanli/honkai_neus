@@ -380,9 +380,9 @@ class Runner:
         rays_mask, zero_mask, inf_mask =  torch.ones((len(rays_o)), dtype=torch.bool), \
             torch.ones((len(rays_o)), dtype=torch.bool), torch.ones((len(rays_o)), dtype=torch.bool) 
         rays_o = rays_o.clone() # VERY important
-# this is a calculation using progressive photon mapping to calculate depth for each single ray, upper is its refinement , 
-# using batch calculation to accelerate the program with only one while logic term.original code please to refer to 
-# genshin_nerf render_depth_core. Now depth is the points from rays_o to surface as the dir is rays_d. however, need to remove outer ones       
+        # this is a calculation using progressive photon mapping to calculate depth for each single ray, upper is its refinement , 
+        # using batch calculation to accelerate the program with only one while logic term.original code please to refer to 
+        # genshin_nerf render_depth_core. Now depth is the points from rays_o to surface as the dir is rays_d. however, need to remove outer ones       
         while torch.sum(rays_mask) > 0:
             pts, dirs = rays_o[rays_mask], rays_d[rays_mask]
             tmp_sdfs =  self.sdf_network.sdf(pts).contiguous().squeeze()
@@ -397,7 +397,8 @@ class Runner:
         zero_points = None
         if torch.sum(zero_mask) > 0: # have legeal depth value
             zero_points = rays_o[zero_mask] # below is wrong because rayso is updated ! 
-            # zero_points = rays_o[zero_mask] + rays_d[zero_mask] * (depths[zero_mask].repeat(3, 1).T)# only consider the points that reaching the zero thereshold 
+            # zero_points = rays_o[zero_mask] + rays_d[zero_mask] * (depths[zero_mask].repeat(3, 1).T)
+            # # only consider the points that reaching the zero thereshold 
         return zero_points      # note it returns a torch tensor
     
     # this function 
@@ -425,7 +426,8 @@ class Runner:
         # rays_o = torch.matmul(camera_pos[None, :3, :3], rays_o[:, :, None]).squeeze()  # batch_size, 3
         # rays_o = rays_o + T1_expand  # batch_size 3, R1*T0 + T1
         # print("equivalent c2w mat: \n", camera_pos.clone().detach().cpu())
-        return self.generate_zero_sdf_points(rays_o=rays_o, rays_d=rays_d, zero_sdf_thereshold=zero_sdf_thereshold, inf_depth_thereshold=inf_depth_thereshold)
+        return self.generate_zero_sdf_points(rays_o=rays_o, rays_d=rays_d,
+                                             zero_sdf_thereshold=zero_sdf_thereshold, inf_depth_thereshold=inf_depth_thereshold)
     
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
@@ -473,10 +475,10 @@ class Runner:
         camera_c2w, intrinsic_inv = self.dataset.pose_all[image_index].clone(), self.dataset.intrinsics_all_inv[image_index].clone()
         rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_c2w, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv, is_np=False)
         # only bactchfy the rays in the mask
-        rays_mask = self.dataset.masks[image_index] > 0.1
+        rays_mask = self.dataset.masks[image_index] > 0
         rays_o, rays_d = rays_o[rays_mask], rays_d[rays_mask]
-        rays_o = rays_o.reshape(-1, 3).requires_grad_(False)
-        rays_d = rays_d.reshape(-1, 3).requires_grad_(False)
+        rays_o = rays_o.reshape(-1, 3)
+        rays_d = rays_d.reshape(-1, 3)
         rays_sum, process_flag = len(rays_o), 0
         zero_points_all = np.empty((0,3))
         for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size), rays_d.split(self.batch_size)):
@@ -495,7 +497,8 @@ class Runner:
             o3d.io.write_point_cloud(store_path, point_cloud)
         return zero_points_all
     
-    def generate_zero_points_full(self, store_dir=None):
+    #store all points from image 0 
+    def generate_zero_points_full(self, store_dir=None, save_per_image=False):
         if store_dir is None:
             store_dir = store_dir = Path("debug", "zero_points_test")
         if not os.path.exists(store_dir):
@@ -504,7 +507,8 @@ class Runner:
         for image_index in range(0, len(self.dataset.images)):
             store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
             # generate this for every image
-            singe_points_full_single_image = self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1) 
+            singe_points_full_single_image = \
+                self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1, write_out_flag=save_per_image) 
             singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
             print_blink("concatenated points generated from image " + str(image_index))
         point_cloud = o3d.geometry.PointCloud() # auto write out
@@ -632,6 +636,7 @@ if __name__ == '__main__':
     parser.add_argument('--case', type=str, default='')
     parser.add_argument('--post_fix', type=str, default='0')
     parser.add_argument('--resolution_level', type=int, default=1)
+    parser.add_argument('--store_dir', type=str, default=None)
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     runner = Runner(args.conf, args.mode, args.case, args.is_continue)
@@ -643,7 +648,7 @@ if __name__ == '__main__':
     elif args.mode == 'validate_image':
         runner.validate_image()
     elif args.mode == 'generate_points':
-        runner.generate_zero_points_full()
+        runner.generate_zero_points_full(store_dir=args.store_dir)
     elif args.mode == 'render_rtkm':
         runner.render_novel_image_with_RTKM(post_fix=args.post_fix, resolution_level=args.resolution_level)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
@@ -661,4 +666,6 @@ python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd
 python exp_runner.py --mode train --conf ./confs/thin_structure_white_bkgd.conf --case bunny2
 python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case tree
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 2 --case bunny_stand
+python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 3 --case dragon_pos1 --store_dir ./exp/dragon_pos1
+python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case dragon_pos2 --store_dir ./exp/dragon_pos2
 """

@@ -6,8 +6,10 @@
     "obj_confs": {
         "0_conf": "./confs/thin_structure_white_bkgd.conf",
         "0_name": "dragon_pos1",
+        "0_npz": "./exp/dragon_pos1/dragon_pos1_full.ply",
         "1_conf": "./confs/thin_structure_white_bkgd.conf",
-        "1_name": "dragon_pos2"
+        "1_name": "dragon_pos2",
+        "1_npz": "./exp/dragon_pos2/dragon_pos2_full.ply"
     },
     "raw_translation" :[-0.00228422, 0.00027235,  0.02778321],
     "raw_quaternion"  :[0.5189141876553386 , -0.7318492017262789 , 0.07693510545623503 , -0.43497793299866394],
