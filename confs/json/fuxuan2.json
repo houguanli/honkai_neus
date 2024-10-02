@@ -1,16 +1,18 @@
 {
     "device": "cuda",
-    "train_iters": 200,
+    "train_iters": 2000,
     "objects_cnt": 2,
     "batch_size": 512,
     "obj_confs": {
         "0_conf": "./confs/thin_structure_white_bkgd.conf",
         "0_name": "dragon_pos1",
+        "0_npz": "./exp/dragon_pos1/dragon_pos1_full.ply",
         "1_conf": "./confs/thin_structure_white_bkgd.conf",
-        "1_name": "dragon_pos2"
+        "1_name": "dragon_pos2",
+        "1_npz": "./exp/dragon_pos2/dragon_pos2_full.ply"
     },
-    "raw_translation" :[-0.0069,  0.0113,  0.0188],
-    "raw_quaternion"  :[0.5262, -0.7276,  0.0705, -0.4348],
+    "raw_translation" :[0.0067, 0.0143, 0.0231],
+    "raw_quaternion"  :[0.5137, -0.7379,  0.0609, -0.4321],
     "standard_index" : 1,
     "to_aligin_index": 0
 }

@@ -5,9 +5,9 @@
     "batch_size": 512,
     "obj_confs": {
         "0_conf": "./confs/thin_structure_white_bkgd.conf",
-        "0_name": "xbox_back",
+        "0_name": "klee_back",
         "1_conf": "./confs/thin_structure_white_bkgd.conf",
-        "1_name": "xbox_front"
+        "1_name": "klee_front"
     },
     "raw_translation" :[0.06639522, -0.00968835,  0.12580145],
     "raw_quaternion"  :[0.16629259148338243 , 0.03458457108120108 , 0.9854272131923291 , 0.009159055462616342],

@@ -105,11 +105,9 @@ def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"
     transform_matrix[0:3, 0:3] = rotate_mat
     transform_matrix[0:3, 3] = translation
     transform_matrix[3, 3] = 1.0
-    ones_row = torch.ones(1, points.shape[1], dtype=points.dtype, device=points.device)
-    points_extended = torch.cat((points, ones_row), dim=0)
-    transfered_points = points_extended * transform_matrix
-    points_3d = transfered_points[:-1, :]
-    return points_3d
+    points = torch.matmul(transform_matrix[None, :3, :3], points[:, :, None]).squeeze(dim=-1)  # N, 3
+    points = points + transform_matrix[None, :3, 3]
+    return points
     
 class HonkaiStart(torch.nn.Module):
     def __init__(self, setting_json_path):
@@ -123,8 +121,8 @@ class HonkaiStart(torch.nn.Module):
         self.standard_index = reg_data['standard_index']
         self.to_aligin_index = reg_data['to_aligin_index']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
-        self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
-        self.objects, self.obj_masks, self.obj_names, self.aabb_trees = [], [], [], []
+        self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True)
+        self.objects, self.obj_masks, self.obj_names, self.aabb_trees, self.zero_sdf_points_all = [], [], [], [], [] # all arrays have the number of objects 
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
@@ -132,6 +130,7 @@ class HonkaiStart(torch.nn.Module):
             current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
             current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name)
+            current_zero_sdf_points = current_exp_runner.split_zero_sdf_points(current_aabb_tree.points)
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
@@ -139,7 +138,9 @@ class HonkaiStart(torch.nn.Module):
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
             self.aabb_trees.append(current_aabb_tree)
+            self.zero_sdf_points_all.append(current_zero_sdf_points)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
+
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -189,21 +190,29 @@ class HonkaiStart(torch.nn.Module):
         # print_info("running with ", images_total, "in total")
         global_loss, visited = 0, False
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
+        aabb_standard, aabb_to_aligin = self.aabb_trees[standard_index], self.aabb_trees[to_aligin_index]
         debug_rgb = []
         for image_index in range(start_index, start_index + images_total):
-            # calc both equv z < 0, assumes in standard it is > 0, so only care about the equv in to_aligin_index
+            rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
+            rays_mask = self.obj_masks[standard_index][image_index]
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
-            pre_calc_c2w = self.calc_equivalent_camera_position(R = self.raw_quaternion, T = self.raw_translation, camera_c2w=orgin_mat_c2w)
-            # print_info("calc eqv z ", pre_calc_c2w[2, 3])
-            if pre_calc_c2w[2, 3] > 0.01: # in both avaible area, start reg
-                visited = True
-                print_info("Running at image ", image_index, "with equ z > 0 ", pre_calc_c2w[2, 3])
-                rays_o, rays_d, rays_gt = self.generate_samples(source_index=standard_index, image_index=image_index)
-                rays_mask = self.obj_masks[standard_index][image_index]
-                 # reshape is used for after mask, it become [rays_sum*3]
-                rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3) 
-                rays_sum = len(rays_o)  
-                # TODO: reformat this function to suit for two poses rendering
+            # reshape is used for after mask, it become [rays_sum*3]
+            rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3) 
+            current_zero_sdf_points = self.zero_sdf_points_all[standard_index][image_index] # zero sdf points from the camera rays o for the object of [standard_index]
+            # apply raw_RT to current_zero_sdf_points, send to cuda first
+            current_zero_sdf_points = torch.from_numpy(current_zero_sdf_points.astype(np.float32)).to('cuda')
+            transed_zero_sdf_points = transfer_points_to_local_axis(points=current_zero_sdf_points, quaternion=self.raw_quaternion, translation=self.raw_translation)
+            # query if some zero point sdf points after applying RT, transed_zero_sdf_points are now in aabb_to_aligin space
+            threshold = 5e-3
+            # special_mask = torch.abs_(neus_to_aligin.query_points_sdf(transed_zero_sdf_points)) < 1e-2
+            counts = np.array(aabb_to_aligin.count_points_within_threshold_batch(transed_zero_sdf_points, threshold=threshold))
+            special_mask = counts > 0
+            rays_o, rays_d, rays_gt = rays_o[special_mask], rays_d[special_mask], rays_gt[special_mask] # remask the target points
+            rays_sum = len(rays_o)
+            print_ok("decteced ", rays_sum, " rays within the thereshold ", threshold)            
+            # in both avaible area, cacluate using initial AABB tree, 
+            if len(rays_o) > 0: # have points exists in both-aviable area
+                visited = True # whether excute optimizing in refine_rt_forward
                 for rays_o_batch, rays_d_batch, rays_gt_batch in zip(rays_o.split(self.batch_size),rays_d.split(self.batch_size), rays_gt.split(self.batch_size)):
                     near, far = neus_to_aligin.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)            
                     background_rgb = None
@@ -244,21 +253,27 @@ class HonkaiStart(torch.nn.Module):
                     cv.imwrite((str(debug_path) + "/" +  self.obj_names[to_aligin_index] + "_" + str(image_index) + ".png" ), debug_out_rgb)
                 elif write_out == "fast" and vis_folder is not None: # fast means only render in the mask, same as genshin_nerf 
                     black_there_hold = 0
-                    W, H, cnt = self.W, self.H, 0
+                    W, H, cnt_in_mask, cnt_in_rgb = self.W, self.H, 0, 0
                     debug_rgb = (np.concatenate(debug_rgb, axis=0).reshape(-1, 3) * 256).clip(0, 255).astype(np.uint8)
                     debug_img = np.zeros([H, W, 3]).astype(np.uint8)
                     for index in range(0, H):
                         for j in range(0, W):
-                            if rays_mask[index][j]:
-                                if debug_rgb[cnt][0] > black_there_hold:
-                                    debug_img[index][j][0] = debug_rgb[cnt][0]
-                                    debug_img[index][j][1] = debug_rgb[cnt][1]
-                                    debug_img[index][j][2] = debug_rgb[cnt][2]
-                                else: # write unfitted rgb as white
-                                    debug_img[index][j][0] = 255
-                                    debug_img[index][j][1] = 255
-                                    debug_img[index][j][2] = 255                       
-                                cnt = cnt + 1
+                            if rays_mask[index][j]: # in the mask
+                                if special_mask[cnt_in_mask]: # index cnt_in_mask also in the special mask
+                                    if debug_rgb[cnt_in_rgb][0] > black_there_hold:
+                                        debug_img[index][j][0] = debug_rgb[cnt_in_rgb][0] # store as in debug_image
+                                        debug_img[index][j][1] = debug_rgb[cnt_in_rgb][1]
+                                        debug_img[index][j][2] = debug_rgb[cnt_in_rgb][2]
+                                    else: # write unfitted rgb as white
+                                        debug_img[index][j][0] = 255
+                                        debug_img[index][j][1] = 255
+                                        debug_img[index][j][2] = 255
+                                    cnt_in_rgb = cnt_in_rgb + 1 # move the index in debug rgb image to the nex one 
+                                else: # outside the  special mask, highlighted as blue
+                                        debug_img[index][j][0] = 0
+                                        debug_img[index][j][1] = 255
+                                        debug_img[index][j][2] = 0   
+                                cnt_in_mask = cnt_in_mask + 1
                     print_blink("saving debug image at " + str(iter_id) + "th validation, with image inedex " + str(image_index))
                     cv.imwrite((vis_folder / (str(iter_id) + "_" + str(image_index) + ".png")).as_posix(), debug_img)
                 else: 
@@ -313,7 +328,8 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
     for i in pbar:
         if single_image_refine: 
             for _ in range (0, single_sub_length):
-                loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=i % img_len)
+                test_devision = 0
+                loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=(i + test_devision) % img_len)
                 optimizer.step()   
                 print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))
                 print('trans gradient : {}, quad gradient : {}, loss: {}'.format(honkaiStart.raw_translation.grad, honkaiStart.raw_quaternion.grad, loss.norm()))   
@@ -343,12 +359,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "xbox_back2front"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1_AABB"), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1
 python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
-python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 0
+python reg_AABB.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 0
 python reg.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 """
     

@@ -374,7 +374,22 @@ class Runner:
         out_depth_fine = []
         return 
     
-    # this function generate_zero_sdf_points from rays_o rays_d.
+    def query_points_sdf(self, query_points):
+        return self.sdf_network.sdf(query_points).contiguous().squeeze()
+    
+    # this function split zero  sdf points from all zero sdf points 
+    def split_zero_sdf_points(self, zero_points_all):
+        start_index, zero_sdf_points_all = 0, []
+        for image_index in range(0, len(self.dataset.images)):
+            mask = self.dataset.masks[image_index] > 0 # notice that the image is pre masked! 
+            mask_len = (int)(mask.sum() / 3)
+            zero_sdf_points_all.append(zero_points_all[start_index : start_index + mask_len, :])
+            start_index = start_index + mask_len 
+        # import pdb; pdb.set_trace()
+        
+        return zero_sdf_points_all
+    
+    # this function generate_zero_sdf_points (N, 3) from rays_o rays_d.
     def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0):
         depths, sdfs = torch.zeros(len(rays_o), dtype=torch.float32), torch.ones(len(rays_o), dtype=torch.float32)
         rays_mask, zero_mask, inf_mask =  torch.ones((len(rays_o)), dtype=torch.bool), \
@@ -419,6 +434,7 @@ class Runner:
         transform_matrix[0:3, 0:3] = rotate_mat
         transform_matrix[0:3, 3] = t
         transform_matrix[3, 3] = 1.0
+        # rotate first
         rays_o = torch.matmul(transform_matrix[None, :3, :3], rays_o[:, :, None]).squeeze(dim=-1)  # W, H, 3
         rays_o = rays_o + transform_matrix[None, :3, 3]
         rays_d = torch.matmul(transform_matrix[None, :3, :3], rays_d[:, :, None]).squeeze(dim=-1)  # W, H, 3
@@ -465,7 +481,9 @@ class Runner:
         for image in images:
             writer.write(image)
         writer.release()
-        
+   
+    # this function generate zero-sdf points of one training image, and save it as a ply file if write_out_flag
+    # returns np array, and only focus the points IN the mask
     def generate_and_save_points_ply_single(self, store_path=None, image_index=0, resolution_level=1, write_out_flag=True):
         if store_path is None:
             store_dir = Path("debug", "zero_points_test")
@@ -497,24 +515,28 @@ class Runner:
             o3d.io.write_point_cloud(store_path, point_cloud)
         return zero_points_all
     
-    #store all points from image 0 
-    def generate_zero_points_full(self, store_dir=None, save_per_image=False):
+    # this function generate ALL zero-sdf points of ALL training image, and save it as a ply file if write_out_flag
+    # returns np array
+    def generate_zero_points_full(self, store_dir=None, save_per_image=False, write_out_flag=True):
         if store_dir is None:
             store_dir = store_dir = Path("debug", "zero_points_test")
         if not os.path.exists(store_dir):
             os.makedirs(store_dir)
-        singe_points_full = np.empty((0, 3))
+        singe_points_full, zero_sdf_points_all = np.empty((0, 3)), []
         for image_index in range(0, len(self.dataset.images)):
             store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
             # generate this for every image
             singe_points_full_single_image = \
                 self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1, write_out_flag=save_per_image) 
             singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
+            zero_sdf_points_all.append(singe_points_full_single_image)
             print_blink("concatenated points generated from image " + str(image_index))
-        point_cloud = o3d.geometry.PointCloud() # auto write out
-        store_path = str(store_dir) + "/" + self.name + "_full.ply"
-        point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
-        o3d.io.write_point_cloud(store_path, point_cloud)
+        if write_out_flag:
+            point_cloud = o3d.geometry.PointCloud() # auto write out
+            store_path = str(store_dir) + "/" + self.name + "_full.ply"
+            point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
+            o3d.io.write_point_cloud(store_path, point_cloud)
+        return zero_sdf_points_all
         
     def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None,
                                      img_W=800, img_H=600, return_render_out=False, resolution_level=1):
