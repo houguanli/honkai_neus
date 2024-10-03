@@ -206,7 +206,7 @@ class HonkaiStart(torch.nn.Module):
             threshold = 5e-3
             # special_mask = torch.abs_(neus_to_aligin.query_points_sdf(transed_zero_sdf_points)) < 1e-2
             counts = np.array(aabb_to_aligin.count_points_within_threshold_batch(transed_zero_sdf_points, threshold=threshold))
-            special_mask = counts > 0
+            special_mask = counts > 5
             rays_o, rays_d, rays_gt = rays_o[special_mask], rays_d[special_mask], rays_gt[special_mask] # remask the target points
             rays_sum = len(rays_o)
             print_ok("decteced ", rays_sum, " rays within the thereshold ", threshold)            
@@ -328,7 +328,7 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
     for i in pbar:
         if single_image_refine: 
             for _ in range (0, single_sub_length):
-                test_devision = 0
+                test_devision = 31
                 loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i, start_index=(i + test_devision) % img_len)
                 optimizer.step()   
                 print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))
@@ -355,11 +355,12 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/json/base.json')
     parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--vis_folder', type=str, default="debug/dragon2to1_AABB3")
     parser.add_argument('--write_out', type=str, default=0)
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon2to1_AABB"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1
