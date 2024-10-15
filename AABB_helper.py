@@ -3,11 +3,14 @@ from scipy.spatial import KDTree
 import open3d as o3d
 import torch
 
-#notice this aabb tree is fully built on numpy ! 
+#notice this aabb tree is fully built on numpy !
 class PointCloud2AABBTree:
-    def __init__(self, npz_file_path):
+    def __init__(self, npz_file_path, point_mask_path=None):
         self.points = self._load_point_cloud(npz_file_path)
         self.aabb_tree = None
+        if point_mask_path is not None:
+            mask = np.loadtxt(point_mask_path, dtype=bool)
+            self.points = self.points[mask] # remove outlier
         self.build_aabb_tree()
 
     def _load_point_cloud(self, npz_file_path):
@@ -49,7 +52,7 @@ class PointCloud2AABBTree:
             distances.append(distance)
         return nearest_points, distances
 
-    def count_points_within_threshold(self, query_point, threshold=1e-3):
+    def count_points_within_threshold(self, query_point, threshold):
         """
         Count the number of points in the point cloud that are within a certain
         distance (threshold) from the given query point.
@@ -90,8 +93,10 @@ class PointCloud2AABBTree:
         cnt = self.count_points_within_threshold(query_point=query_point, threshold=threshold)
         return cnt >= in_point_number
     
-    def get_aabb_tree(npz_path):
-        return PointCloud2AABBTree(npz_path)
+    def get_aabb_tree(npz_path, point_mask_path=None):
+        return PointCloud2AABBTree(npz_path,point_mask_path=point_mask_path)
+    
+    
 
 class PointCloud2HashVoxel:
     def __init__(self, ply_file_path, resolution=512):

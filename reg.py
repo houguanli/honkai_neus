@@ -286,8 +286,8 @@ def get_optimizer(mode, honkaiStart):
     if  mode == "refine_rt":
         optimizer = torch.optim.Adam(
             [
-                {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 1e-3},
-                {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 1e-3},
+                {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 1e-4},
+                {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 1e-4},
             ],
             amsgrad=False
         )
@@ -343,7 +343,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "xbox_back2front"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon_fricp"), single_image_refine=True, write_out=args.write_out)
 
 """
 python reg.py --conf ./confs/json/march7th.json --gpu 1

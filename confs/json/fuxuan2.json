@@ -7,9 +7,11 @@
         "0_conf": "./confs/thin_structure_white_bkgd.conf",
         "0_name": "dragon_pos1",
         "0_npz": "./exp/dragon_pos1/dragon_pos1_full.ply",
+        "0_npz_mask": "./exp/dragon_pos1/dragon_pos1_full_mask.txt",
         "1_conf": "./confs/thin_structure_white_bkgd.conf",
         "1_name": "dragon_pos2",
-        "1_npz": "./exp/dragon_pos2/dragon_pos2_full.ply"
+        "1_npz": "./exp/dragon_pos2/dragon_pos2_full.ply",
+        "1_npz_mask": "./exp/dragon_pos2/dragon_pos2_full_mask.txt"
     },
     "raw_translation" :[0.0067, 0.0143, 0.0231],
     "raw_quaternion"  :[0.5137, -0.7379,  0.0609, -0.4321],

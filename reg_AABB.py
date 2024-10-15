@@ -128,8 +128,9 @@ class HonkaiStart(torch.nn.Module):
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
             current_obj_name = reg_data['obj_confs'][current_name + "_name"]
             current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
+            current_point_mask_name = reg_data['obj_confs'][current_name + "_npz_mask"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
-            current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name)
+            current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name, point_mask_path=current_point_mask_name)
             current_zero_sdf_points = current_exp_runner.split_zero_sdf_points(current_aabb_tree.points)
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
@@ -203,10 +204,10 @@ class HonkaiStart(torch.nn.Module):
             current_zero_sdf_points = torch.from_numpy(current_zero_sdf_points.astype(np.float32)).to('cuda')
             transed_zero_sdf_points = transfer_points_to_local_axis(points=current_zero_sdf_points, quaternion=self.raw_quaternion, translation=self.raw_translation)
             # query if some zero point sdf points after applying RT, transed_zero_sdf_points are now in aabb_to_aligin space
-            threshold = 5e-3
+            threshold = 2e-3
             # special_mask = torch.abs_(neus_to_aligin.query_points_sdf(transed_zero_sdf_points)) < 1e-2
             counts = np.array(aabb_to_aligin.count_points_within_threshold_batch(transed_zero_sdf_points, threshold=threshold))
-            special_mask = counts > 5
+            special_mask = counts > 0
             rays_o, rays_d, rays_gt = rays_o[special_mask], rays_d[special_mask], rays_gt[special_mask] # remask the target points
             rays_sum = len(rays_o)
             print_ok("decteced ", rays_sum, " rays within the thereshold ", threshold)            
@@ -363,9 +364,8 @@ if __name__ == '__main__':
     refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
 
 """
-python reg.py --conf ./confs/json/march7th.json --gpu 1
 python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
-python reg_AABB.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 0
+python reg_AABB.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
 python reg.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 """
     

@@ -164,8 +164,8 @@ class Dataset:
         self.H = h
 
     def gen_random_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
-        pixels_x = torch.randint(low=0, high=self.W, size=[batch_size])
-        pixels_y = torch.randint(low=0, high=self.H, size=[batch_size])
+        pixels_x = torch.randint(low=0, high=self.W, size=[self.batch_size])
+        pixels_y = torch.randint(low=0, high=self.H, size=[self.batch_size])
         transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32))
         transform_matrix = transform_matrix.cuda()  # add to cuda
         transform_matrix.requires_grad_(True)

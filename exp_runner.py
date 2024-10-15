@@ -390,7 +390,7 @@ class Runner:
         return zero_sdf_points_all
     
     # this function generate_zero_sdf_points (N, 3) from rays_o rays_d.
-    def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0):
+    def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0, return_all = True):
         depths, sdfs = torch.zeros(len(rays_o), dtype=torch.float32), torch.ones(len(rays_o), dtype=torch.float32)
         rays_mask, zero_mask, inf_mask =  torch.ones((len(rays_o)), dtype=torch.bool), \
             torch.ones((len(rays_o)), dtype=torch.bool), torch.ones((len(rays_o)), dtype=torch.bool) 
@@ -410,13 +410,17 @@ class Runner:
             rays_mask = ~rays_mask
         # print(sdfs)
         zero_points = None
-        if torch.sum(zero_mask) > 0: # have legeal depth value
+        if return_all:
+            zero_points = rays_o
+        elif torch.sum(zero_mask) > 0: # have legeal depth value
             zero_points = rays_o[zero_mask] # below is wrong because rayso is updated ! 
             # zero_points = rays_o[zero_mask] + rays_d[zero_mask] * (depths[zero_mask].repeat(3, 1).T)
             # # only consider the points that reaching the zero thereshold 
-        return zero_points      # note it returns a torch tensor
+        else:
+            print("No points are generated from SDF field")
+        return zero_points, zero_mask      # note it returns a torch tensor
     
-    # this function 
+    # this function is used for out calling 
     def generate_zero_sdf_points_with_RT(self, rays_o, rays_d, q, t, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0): 
         # expand as 4x4mat 
         w, x, y, z = q
@@ -498,22 +502,27 @@ class Runner:
         rays_o = rays_o.reshape(-1, 3)
         rays_d = rays_d.reshape(-1, 3)
         rays_sum, process_flag = len(rays_o), 0
-        zero_points_all = np.empty((0,3))
+        zero_points_all, zero_mask_all = np.empty((0,3)), np.empty((0,1))
         for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size), rays_d.split(self.batch_size)):
             # with torch.no_grad():
-            zero_points = self.generate_zero_sdf_points(rays_o=rays_o_batch, rays_d=rays_d_batch)
+            zero_points, zero_mask = self.generate_zero_sdf_points(rays_o=rays_o_batch, rays_d=rays_d_batch)
             if zero_points is None:
                 continue
             zero_points = zero_points.detach().cpu().numpy()
+            zero_mask = zero_mask.detach().cpu().numpy()
+            zero_mask = zero_mask.reshape(-1, 1)
+            # import pdb; pdb.set_trace()
+            
             zero_points_all = np.concatenate((zero_points_all, zero_points), axis=0) # contact results
-            del zero_points
+            zero_mask_all   = np.concatenate((zero_mask_all, zero_mask), axis=0)  # contact mask results
+            del zero_points, zero_mask
             process_flag += self.batch_size
             # print("calculating rays ", process_flag, "with total ", rays_sum)
         if write_out_flag:
             point_cloud = o3d.geometry.PointCloud()
             point_cloud.points = o3d.utility.Vector3dVector(zero_points_all)
             o3d.io.write_point_cloud(store_path, point_cloud)
-        return zero_points_all
+        return zero_points_all, zero_mask_all
     
     # this function generate ALL zero-sdf points of ALL training image, and save it as a ply file if write_out_flag
     # returns np array
@@ -526,7 +535,7 @@ class Runner:
         for image_index in range(0, len(self.dataset.images)):
             store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
             # generate this for every image
-            singe_points_full_single_image = \
+            singe_points_full_single_image, _ = \
                 self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1, write_out_flag=save_per_image) 
             singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
             zero_sdf_points_all.append(singe_points_full_single_image)
@@ -537,6 +546,30 @@ class Runner:
             point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
             o3d.io.write_point_cloud(store_path, point_cloud)
         return zero_sdf_points_all
+   
+    def generate_zero_points_full_with_masks(self, store_dir=None, save_per_image=False, write_out_flag=True):
+        if store_dir is None:
+            store_dir = store_dir = Path("debug", "zero_points_test")
+        if not os.path.exists(store_dir):
+            os.makedirs(store_dir)
+        singe_points_full, zero_sdf_points_all, points_mask_full = np.empty((0, 3)), [], np.empty((0, 1))
+        for image_index in range(0, len(self.dataset.images)):
+            store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
+            # generate this for every image
+            singe_points_full_single_image, points_mask = \
+                self.generate_and_save_points_ply_single(store_path, image_index=image_index, resolution_level=1, write_out_flag=save_per_image) 
+            singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image), axis=0) # contact results
+            zero_sdf_points_all.append(singe_points_full_single_image)
+            points_mask_full = np.concatenate((points_mask_full, points_mask), axis=0) # contact results
+            print_blink("concatenated points generated from image " + str(image_index))
+        if write_out_flag:
+            point_cloud = o3d.geometry.PointCloud() # auto write out
+            store_path = str(store_dir) + "/" + self.name + "_full.ply"
+            point_cloud.points = o3d.utility.Vector3dVector(singe_points_full)
+            o3d.io.write_point_cloud(store_path, point_cloud)
+            store_path = str(store_dir) + "/" + self.name + "_full_mask.txt"
+            np.savetxt(store_path, points_mask_full, fmt='%d')
+        return zero_sdf_points_all, points_mask_full
         
     def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None,
                                      img_W=800, img_H=600, return_render_out=False, resolution_level=1):
@@ -671,6 +704,8 @@ if __name__ == '__main__':
         runner.validate_image()
     elif args.mode == 'generate_points':
         runner.generate_zero_points_full(store_dir=args.store_dir)
+    elif args.mode == 'generate_points_wm':
+        runner.generate_zero_points_full_with_masks(store_dir=args.store_dir)
     elif args.mode == 'render_rtkm':
         runner.render_novel_image_with_RTKM(post_fix=args.post_fix, resolution_level=args.resolution_level)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
@@ -690,4 +725,5 @@ python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 2 --case bunny_stand
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 3 --case dragon_pos1 --store_dir ./exp/dragon_pos1
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case dragon_pos2 --store_dir ./exp/dragon_pos2
+python exp_runner.py --mode generate_points_wm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case dragon_pos2 --store_dir ./exp/dragon_pos2
 """
