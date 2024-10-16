@@ -8,3 +8,4 @@ numpy~=1.25.2
 opencv-python~=4.8.0.76
 trimesh~=3.9.8
 pyhocon~=0.3.57
+pybind11-stubgen

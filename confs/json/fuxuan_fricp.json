@@ -15,6 +15,6 @@
     },
     "raw_translation" :[0.00830474, 0.0140074,  0.0229845 ],
     "raw_quaternion"  :[ 0.5159835268688333 , -0.744093037872506 , 0.06158384588909125 , -0.41987435396377204 ],
-    "standard_index" : 1,
-    "to_aligin_index": 0
+    "source_index" : 1,
+    "target_index": 0
 }

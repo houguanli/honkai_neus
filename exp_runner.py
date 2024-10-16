@@ -378,16 +378,28 @@ class Runner:
         return self.sdf_network.sdf(query_points).contiguous().squeeze()
     
     # this function split zero  sdf points from all zero sdf points 
-    def split_zero_sdf_points(self, zero_points_all):
+    def split_zero_sdf_points(self, zero_points_all, mask_for_points=None): # should expend both as N, 3 
         start_index, zero_sdf_points_all = 0, []
+        if mask_for_points is None:
+            mask4zero_sdf_points_all, unmasked_zero_sdf_points_all = None, None
+        else:
+            mask4zero_sdf_points_all, unmasked_zero_sdf_points_all = [], []
         for image_index in range(0, len(self.dataset.images)):
             mask = self.dataset.masks[image_index] > 0 # notice that the image is pre masked! 
             mask_len = (int)(mask.sum() / 3)
-            zero_sdf_points_all.append(zero_points_all[start_index : start_index + mask_len, :])
+            append_sub = zero_points_all[start_index : start_index + mask_len, :]
+            if mask_for_points is not None: # exist invaild points 
+                mask_sub = mask_for_points[start_index : start_index + mask_len, :]
+                mask4zero_sdf_points_all.append(mask_sub)
+                unmasked_zero_sdf_points_all.append(append_sub) # append unmasked_points
+                append_sub = append_sub[mask_sub] # mask the points
+                append_sub = append_sub.reshape(-1, 3)
+            zero_sdf_points_all.append(append_sub) # append masked_points
             start_index = start_index + mask_len 
-        # import pdb; pdb.set_trace()
+            # print(image_index)
+            # import pdb; pdb.set_trace()
         
-        return zero_sdf_points_all
+        return zero_sdf_points_all, mask4zero_sdf_points_all, unmasked_zero_sdf_points_all
     
     # this function generate_zero_sdf_points (N, 3) from rays_o rays_d.
     def generate_zero_sdf_points(self, rays_o, rays_d, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0, return_all = True):

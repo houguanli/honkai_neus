@@ -331,7 +331,7 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
 
 
 if __name__ == '__main__':
-    print_blink('Honkai NerF, start!!!')
+    print_blink('Honkai NeRF, start!!!')
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     torch.set_default_dtype(torch.float32)
     FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
@@ -346,9 +346,9 @@ if __name__ == '__main__':
     refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon_fricp"), single_image_refine=True, write_out=args.write_out)
 
 """
-python reg.py --conf ./confs/json/march7th.json --gpu 1
-python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
-python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 0
-python reg.py --conf ./confs/json/klee.json --write_out fast --gpu 3
+python honkai_nerf.py --conf ./confs/json/march7th.json --gpu 1
+python honkai_nerf.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
+python honkai_nerf.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 0
+python honkai_nerf.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 """
     

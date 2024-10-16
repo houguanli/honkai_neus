@@ -40,7 +40,8 @@ dists, idxs, nn, grid = frnn.frnn_grid_points(
 print(idxs.shape)
 
 # print(source_point[0,865])
-
+import pdb; pdb.set_trace()
 for i in range(0, query_point_num):
     for j in range(0, neighbor_num):
-        print(f'The {j+1}th nearest point in source point cloud to the {i+1}th point in query point could is:', source_point[0, idxs[0, i, 0]])
+        print(f'The {j+1}th nearest point in source point cloud to the {i+1}th point in query point could is:', source_point[0, idxs[0, i, j]])
+        print("corresponding dist: ", dists[0, i, j])
