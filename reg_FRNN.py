@@ -216,17 +216,19 @@ class HonkaiStart(torch.nn.Module):
             threshold = 1e-6 # this is a square distance
             # special_mask = torch.abs_(neus_to_aligin.query_points_sdf(transed_zero_sdf_points)) < 1e-2
             # counts = np.array(aabb_to_aligin.count_points_within_threshold_batch(transed_zero_sdf_points, threshold=threshold))
-            dists, _ = aabb_to_aligin.query_nearest_points(transed_zero_sdf_points)
-            filter_mask = dists < threshold
-            rays_o, rays_d, rays_gt = rays_o[filter_mask], rays_d[filter_mask], rays_gt[filter_mask] # remask the target points
+            # counts, _ = aabb_to_aligin.query_nearest_points(transed_zero_sdf_points)
+            counts = aabb_to_aligin.judge_points_within_ball(transed_zero_sdf_points, ball_dist=threshold, max_init_points=200, threshold_cnt=150)
+            # filter_mask = counts < threshold
+            filter_mask = counts 
+            rays_o, rays_d, rays_gt = rays_o[filter_mask].reshape(-1, 3), rays_d[filter_mask].reshape(-1, 3), rays_gt[filter_mask].reshape(-1, 3) # remask the target points
             rays_sum = len(rays_o)
             true_indices_filter_mask = torch.nonzero(filter_mask).squeeze() # -1,3 -> -1,1
+            rays_special_mask_1d = rays_special_mask[:,0]
             debug_mask = torch.zeros(rays_special_mask[:,0].size(0), dtype=torch.bool) # shape as -1, 3 in rays_mask, filled with final selected points
             num_true_b = true_indices_filter_mask.numel()
             debug_mask[true_indices_filter_mask[:num_true_b]] = True
+            print_ok("decteced ", rays_sum, " rays within the square-thereshold ", threshold)  
             # import pdb; pdb.set_trace()
-            
-            print_ok("decteced ", rays_sum, " rays within the thereshold ", threshold)            
             # in both avaible area, cacluate using initial AABB tree, 
             if len(rays_o) > 0: # have points exists in both-aviable area
                 visited = True # whether excute optimizing in refine_rt_forward
@@ -255,8 +257,6 @@ class HonkaiStart(torch.nn.Module):
                     global_loss += mask_fine_loss.clone().detach()
                     mask_fine_loss.backward()  # img_loss for refine R & T
                     torch.cuda.synchronize()
-                    # import pdb; pdb.set_trace()
-                    
                     del render_out
                 if write_out == "full" and vis_folder is not None:
                     # import pdb; pdb.set_trace();
@@ -271,38 +271,44 @@ class HonkaiStart(torch.nn.Module):
                 elif write_out == "fast" and vis_folder is not None: 
                 # fast means only render in the mask, same as genshin_nerf 
                     black_there_hold = 0
-                    W, H, cnt_in_mask, cnt_in_rgb = self.W, self.H, 0, 0
+                    W, H, cnt_in_mask, cnt_in_sp_mask, cnt_in_rgb = self.W, self.H, 0, 0, 0
                     debug_rgb = (np.concatenate(debug_rgb, axis=0).reshape(-1, 3) * 256).clip(0, 255).astype(np.uint8)
                     debug_img = np.zeros([H, W, 3]).astype(np.uint8)
                     for index in range(0, H):
                         for j in range(0, W):
                             if rays_mask[index][j]: # in the mask of the dataset
-                                if debug_mask[cnt_in_mask]: # index cnt_in_mask also in the special mask
-                                    if debug_rgb[cnt_in_rgb][0] > black_there_hold:
-                                        debug_img[index][j][0] = debug_rgb[cnt_in_rgb][0] # store as in debug_image
-                                        debug_img[index][j][1] = debug_rgb[cnt_in_rgb][1]
-                                        debug_img[index][j][2] = debug_rgb[cnt_in_rgb][2]
-                                    else: # write unfitted rgb as white
+                                if rays_special_mask_1d[cnt_in_mask]: # index cnt_in_mask also in the special mask
+                                    if filter_mask[cnt_in_sp_mask]: # finally in the filter_mask, which means contains enough neighbors
+                                        if debug_rgb[cnt_in_rgb][0] > black_there_hold:
+                                            debug_img[index][j][0] = debug_rgb[cnt_in_rgb][0] # store as in debug_image
+                                            debug_img[index][j][1] = debug_rgb[cnt_in_rgb][1]
+                                            debug_img[index][j][2] = debug_rgb[cnt_in_rgb][2]
+                                        else: # write unfitted rgb as white
+                                            debug_img[index][j][0] = 255
+                                            debug_img[index][j][1] = 255
+                                            debug_img[index][j][2] = 255
+                                        cnt_in_rgb = cnt_in_rgb + 1 # move the index in debug rgb image to the nex one 
+                                    else: # outside the filter_mask , highlighted as blue
                                         debug_img[index][j][0] = 255
-                                        debug_img[index][j][1] = 255
-                                        debug_img[index][j][2] = 255
-                                    cnt_in_rgb = cnt_in_rgb + 1 # move the index in debug rgb image to the nex one 
+                                        debug_img[index][j][1] = 0
+                                        debug_img[index][j][2] = 0
+                                    cnt_in_sp_mask = cnt_in_sp_mask + 1
                                 else: # outside the  special mask, highlighted as green
-                                        debug_img[index][j][0] = 0
-                                        debug_img[index][j][1] = 255
-                                        debug_img[index][j][2] = 0   
+                                    debug_img[index][j][0] = 0
+                                    debug_img[index][j][1] = 255
+                                    debug_img[index][j][2] = 0   
                                 cnt_in_mask = cnt_in_mask + 1
                     print_blink("saving debug image at " + str(iter_id) + "th validation, with image inedex " + str(image_index))
                     cv.imwrite((vis_folder / (str(iter_id) + "_" + str(image_index) + ".png")).as_posix(), debug_img)
                     # write correspond ply to check result
-                    point_cloud = o3d.geometry.PointCloud() # auto write out
+                    # point_cloud = o3d.geometry.PointCloud() # auto write out
                     # import pdb; pdb.set_trace()
-                    store_path = (vis_folder / (str(iter_id) + "_" + str(image_index) + "cur.ply"))
-                    point_cloud.points = o3d.utility.Vector3dVector(current_zero_sdf_points.clone().detach().cpu().numpy())
-                    o3d.io.write_point_cloud(str(store_path), point_cloud)
-                    store_path = (vis_folder / (str(iter_id) + "_" + str(image_index) + "tra.ply"))
-                    point_cloud.points = o3d.utility.Vector3dVector(transed_zero_sdf_points.clone().detach().cpu().numpy())
-                    o3d.io.write_point_cloud(str(store_path), point_cloud)
+                    # store_path = (vis_folder / (str(iter_id) + "_" + str(image_index) + "cur.ply"))
+                    # point_cloud.points = o3d.utility.Vector3dVector(current_zero_sdf_points.clone().detach().cpu().numpy())
+                    # o3d.io.write_point_cloud(str(store_path), point_cloud)
+                    # store_path = (vis_folder / (str(iter_id) + "_" + str(image_index) + "tra.ply"))
+                    # point_cloud.points = o3d.utility.Vector3dVector(transed_zero_sdf_points.clone().detach().cpu().numpy())
+                    # o3d.io.write_point_cloud(str(store_path), point_cloud)
                 else: 
                     print("no debug output")
             else:
@@ -328,8 +334,8 @@ def get_optimizer(mode, honkaiStart):
     if  mode == "refine_rt":
         optimizer = torch.optim.Adam(
             [
-                {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 1e-3},
-                {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 1e-3},
+                {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 3e-5},
+                {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 3e-5},
             ],
             amsgrad=False
         )

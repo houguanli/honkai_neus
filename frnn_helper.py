@@ -7,7 +7,7 @@ import torch
 
 
 dim = 3
-max_length = 100
+max_length = 200
 init_neighbor_num = 1
 init_query_point_num = 514
 
@@ -23,9 +23,9 @@ class FRNN:
             self.mask = np.loadtxt(point_mask_path, dtype=bool)
             point_cloud = o3d.geometry.PointCloud() # auto write out
             self.points = self.points[self.mask] # remove outlier
-            store_path ="./test_mask.ply"
-            point_cloud.points = o3d.utility.Vector3dVector(self.points)
-            o3d.io.write_point_cloud(store_path, point_cloud)
+            # store_path ="./debug/test_mask.ply"
+            # point_cloud.points = o3d.utility.Vector3dVector(self.points)
+            # o3d.io.write_point_cloud(store_path, point_cloud)
         self.build_frnn_on_torch()
         return
     
@@ -48,7 +48,6 @@ class FRNN:
             grid=None, return_nn=False, return_sorted=True)
         self.grid = grid # save the grid for further query
         
-        
     def query_Knear_points(self, query_points, points_num): # torch, N, 3
         query_points = query_points.reshape(1, len(query_points), dim)
         dists, idxs, nn, _ = frnn.frnn_grid_points(
@@ -60,8 +59,13 @@ class FRNN:
         dists, idxs, _ = self.query_Knear_points(query_points, 1) # K = 1
         return dists.squeeze(), idxs.squeeze() # return shape N N 
     
-    def query_search_within_ball(self, query_points, ball_dist):
-        return 
+    def judge_points_within_ball(self, query_points, ball_dist, max_init_points = max_length, threshold_cnt=1): # default is the nearest
+        dists, _, _ = self.query_Knear_points(query_points, max_init_points) # K = max len
+        dists = dists.squeeze()
+        ava_flag = dists <= ball_dist
+        ava_flag = torch.sum(ava_flag, dim=1) >= threshold_cnt
+        # import pdb; pdb.set_trace()
+        return ava_flag
     
     def get_frnn_tree(npz_path, point_mask_path=None):
         return FRNN(npz_path,point_mask_path=point_mask_path)  

@@ -1,6 +1,6 @@
 {
     "device": "cuda",
-    "train_iters": 2000,
+    "train_iters": 200,
     "objects_cnt": 2,
     "batch_size": 512,
     "obj_confs": {
