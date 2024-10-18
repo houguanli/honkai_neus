@@ -1,3 +1,18 @@
+/**
+ * @file PY_FRICP.cpp
+ * @author MatchaBuffy
+ * @brief This file is the python binding for FRICP. It provides a class PY_FRICP to run FRICP in python.
+ * As the source project is only implemented in double, so although the PY_FRICP class is a template class, it is only instantiated for double.
+ * Make sure you cover the data type of the input points and the transformation matrix to double or float64 in python.
+ * A example of how to use this class is shown in the examples/py_fricp.py.
+ * For installation, you can run the bash script set_fricp.sh in the root directory.
+ * Make sure you have installed the dependencies which are required by Fast-Robust-ICP before running the script.
+ * @version 0.1
+ * @date 2024-10-19
+ * 
+ * @copyright Copyright (c) 2024
+ * 
+ */
 #include <iostream>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -14,24 +29,93 @@ public:
     typedef Eigen::Matrix<T, 3, 1> VectorN;
     PY_FRICP();
     ~PY_FRICP() {}
+    /**
+     * @brief Set the source points
+     * @param[in] source_point: source points. Numpy array of shape (3, N)
+     * @return void
+     */
     void set_source_points(py::array_t<T> &source_point);
+
+    /**
+     * @brief Set the target points
+     * @param[in] target_point: target points. Numpy array of shape (3, N)
+     * @return void
+     */
     void set_target_points(py::array_t<T> &target_point);
+
+    /**
+     * @brief Set the source points from file
+     * @param[in] file_source: source file path.
+     * @return void
+     */
     void set_source_from_file(std::string file_source);
+
+    /**
+     * @brief Set the target points from file
+     * @param[in] file_target: target file path.
+     * @return void
+     */
     void set_target_from_file(std::string file_target);
+
+    /**
+     * @brief Set the source and target points
+     * @param[in] source_point: source points. Numpy array of shape (3, N)
+     * @param[in] target_point: target points. Numpy array of shape (3, N)
+     */
     void set_points(py::array_t<T> &source_point, py::array_t<T> &target_point);
+
+    /**
+     * @brief Set the source and target points from file
+     * @param[in] file_source: source file path.
+     * @param[in] file_target: target file path.
+     * @return void
+     */
     void set_points_from_file(std::string file_source, std::string file_target);
-    void numpy_to_eigen(py::array_t<T> &arr);
+
+    /**
+     * @brief Set the initial transformation matrix. Default is identity matrix.
+     * @param[in] init_matrix: initial transformation matrix. Numpy array of shape (4, 4).
+     * @return void
+     */
     void set_init_matrix(py::array_t<T> &init_matrix);
+
 public:
-    py::array_t<T> run_icp(unsigned int method = 3);   // TODO
+    /**
+     * @brief Run ICP. Make sure you have set the source and target points before calling this function.
+     * @param[in] method: ICP method. Default is RICP.
+     * @return transformation matrix. Numpy array of shape (4, 4)
+     * @note method:
+     * 0: ICP
+     * 1: AA-ICP
+     * 2: FICP
+     * 3: RICP
+     * 4: PPL
+     * 5: RPPL
+     * 6: SparseICP
+     * 7: SICPPPL
+     * @note method 4, 5, 7 need to set the normal of target points.
+     * @note method 6, 7 need to set the normal of source points.
+     * @note method 7 need to set the normal of target points.
+     * @note method 0, 1, 2, 3, 6 don't need to set the normal.
+     */
+    py::array_t<T> run_icp(unsigned int method = 3);
+
 private:
-    Vertices vertices;
-    Vertices vertices_source, normal_source, src_vert_colors;
-    Vertices vertices_target, normal_target, tar_vert_colors;
-    MatrixXX init_matrix;
-    MatrixXX res_trans;
-    enum Method{ICP, AA_ICP, FICP, RICP, PPL, RPPL, SparseICP, SICPPPL} m_method=RICP;
-    bool use_init{false};
+        /**
+     * @brief Set the initial transformation matrix
+     * @param[in] init_matrix: initial transformation matrix. Numpy array of shape (4, 4)
+     * @return void
+     */
+    void numpy_to_eigen(py::array_t<T> &arr);
+
+private:
+    Vertices vertices;  // A medium to store the input vertices
+    Vertices vertices_source, normal_source, src_vert_colors; // source points
+    Vertices vertices_target, normal_target, tar_vert_colors; // target points
+    MatrixXX init_matrix; // initial transformation matrix
+    MatrixXX res_trans;  // result transformation matrix
+    enum Method{ICP, AA_ICP, FICP, RICP, PPL, RPPL, SparseICP, SICPPPL} m_method=RICP; // ICP method
+    bool use_init{false};   // whether use initial transformation matrix
 };
 
 template <typename T>
@@ -275,12 +359,10 @@ py::array_t<T> PY_FRICP<T>::run_icp(unsigned int method)
 // template class PY_FRICP<float>;
 template class PY_FRICP<double>;
 
-
 PYBIND11_MODULE(py_fricp, m) {
     m.doc() = "Fast Robust ICP";
     // py::class_<PY_FRICP<float>>(m, "PY_FRICP_float")
     //     .def(py::init<>())
-    //     .def("numpy_to_eigen", &PY_FRICP<float>::numpy_to_eigen, "Convert numpy array to Eigen matrix", py::arg("arr"))
     //     .def("set_source_points", &PY_FRICP<float>::set_source_points, "Set source points", py::arg("source_point"))
     //     .def("set_target_points", &PY_FRICP<float>::set_target_points, "Set target points", py::arg("target_point"))
     //     .def("set_points", &PY_FRICP<float>::set_points, "Set source and target points", py::arg("source_point"), py::arg("target_point"))
@@ -288,8 +370,7 @@ PYBIND11_MODULE(py_fricp, m) {
     //     .def("set_init_matrix", &PY_FRICP<float>::set_init_matrix, "Set initial transformation matrix", py::arg("init_matrix"));
     py::class_<PY_FRICP<double>>(m, "PY_FRICPd")
         .def(py::init<>())
-        .def("numpy_to_eigen", &PY_FRICP<double>::numpy_to_eigen, "Convert numpy array to Eigen matrix", py::arg("arr"))
-        .def("set_source_points", &PY_FRICP<double>::set_source_points, "Set source points", py::arg("source_point"))
+        .def("set_source_points", &PY_FRICP<double>::set_source_points, "Set source points.", py::arg("source_point"))
         .def("set_target_points", &PY_FRICP<double>::set_target_points, "Set target points", py::arg("target_point"))
         .def("set_points", &PY_FRICP<double>::set_points, "Set source and target points", py::arg("source_point"), py::arg("target_point"))
         .def("set_init_matrix", &PY_FRICP<double>::set_init_matrix, "Set initial transformation matrix", py::arg("init_matrix"))
