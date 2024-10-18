@@ -8,6 +8,8 @@ __pycache__/
 # C extensions
 *.so
 *.pyi
+*.ply
+*.obj
 
 .vscode/
 
@@ -153,7 +155,7 @@ crashlytics.properties
 crashlytics-build.properties
 fabric.properties
 debug
-# data
+data
 public_data
 exp
 tmp
