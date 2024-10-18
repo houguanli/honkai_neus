@@ -7,3 +7,5 @@ cp build/py_fricp.* ./models
 pybind11-stubgen build.py_fricp
 mv stubs/build/py_fricp.* ./models
 rm -rf stubs
+echo "Fricp setup complete"
+echo "Run 'python example/py_fricp.py' to test the model"

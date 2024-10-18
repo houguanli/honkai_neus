@@ -97,7 +97,7 @@ ENV/
 # http://iamzed.com/2009/05/07/a-primer-on-virtualenv/
 .Python
 [Bb]in
-[Ii]nclude
+# [Ii]nclude
 [Ll]ib
 [Ll]ib64
 [Ll]ocal
@@ -153,7 +153,7 @@ crashlytics.properties
 crashlytics-build.properties
 fabric.properties
 debug
-data
+# data
 public_data
 exp
 tmp
