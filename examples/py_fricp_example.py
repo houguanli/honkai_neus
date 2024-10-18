@@ -2,8 +2,7 @@ import models.py_fricp as py_fricp
 import numpy as np  
 import open3d as o3d
 
-
-# Create a new instance of the Fricp class
+# Create a new instance of the Fricp class, for now only the double precision version is available
 fricp = py_fricp.PY_FRICPd()
 
 '''
@@ -16,8 +15,12 @@ source = o3d.io.read_point_cloud("data/source.ply")
 target = o3d.io.read_point_cloud("data/target.ply")
 
 # convert the point clouds to numpy arrays
-source = np.asarray(source.points).astype(np.float64)
-target = np.asarray(target.points).astype(np.float64)
+# As the the point clouds read by the open3d library are already float64, we don't need to convert them,
+# but if the point clouds are of any other type, convert them to float64
+source = np.asarray(source.points)#.astype(np.float64)
+target = np.asarray(target.points)#.astype(np.float64)
+print("Source type:", source.dtype)
+print("Target type:", target.dtype)
 # reshape as 3 x N
 source = source.T
 target = target.T

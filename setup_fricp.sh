@@ -1,3 +1,4 @@
+pip install pybind11-stubgen
 cmake -B build .
 cd build
 make -j4
