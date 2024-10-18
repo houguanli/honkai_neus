@@ -95,10 +95,7 @@ public:
      * 5: RPPL
      * 6: SparseICP
      * 7: SICPPPL
-     * @note method 4, 5, 7 need to set the normal of target points.
-     * @note method 6, 7 need to set the normal of source points.
-     * @note method 7 need to set the normal of target points.
-     * @note method 0, 1, 2, 3, 6 don't need to set the normal.
+     * 
      */
     py::array_t<T> run_icp(unsigned int method = 3);
 
