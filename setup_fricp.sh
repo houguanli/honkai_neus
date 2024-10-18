@@ -1,5 +1,5 @@
 pip install pybind11-stubgen
-cmake -B build .
+cmake -B build . -DCMAKE_BUILD_TYPE=Release
 cd build
 make -j4
 cd ..

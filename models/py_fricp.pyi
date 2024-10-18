@@ -10,10 +10,6 @@ class PY_FRICPd:
         ...
     def __init__(self) -> None:
         ...
-    def numpy_to_eigen(self, arr: numpy.ndarray[numpy.float64]) -> None:
-        """
-        Convert numpy array to Eigen matrix
-        """
     def run_icp(self, method: int = 3) -> numpy.ndarray[numpy.float64]:
         """
         Run ICP
@@ -36,7 +32,7 @@ class PY_FRICPd:
         """
     def set_source_points(self, source_point: numpy.ndarray[numpy.float64]) -> None:
         """
-        Set source points
+        Set source points.
         """
     def set_target_from_file(self, file_target: str) -> None:
         """

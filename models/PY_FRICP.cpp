@@ -20,6 +20,8 @@
 #include "ICP.h"
 #include "io_pc.h"
 
+#define TO_STRING(X) case X: return #X
+
 namespace py = pybind11;
 
 template <typename T>
@@ -108,6 +110,7 @@ private:
      */
     void numpy_to_eigen(py::array_t<T> &arr);
 
+    const char* enum_to_string(int method);
 private:
     Vertices vertices;  // A medium to store the input vertices
     Vertices vertices_source, normal_source, src_vert_colors; // source points
@@ -122,6 +125,24 @@ template <typename T>
 PY_FRICP<T>::PY_FRICP() {
     //set initial transformation to identity matrix
     init_matrix = MatrixXX::Identity(4, 4);
+}
+
+template <typename T>
+const char* PY_FRICP<T>::enum_to_string(int method)
+{
+    switch(method)
+    {
+        TO_STRING(ICP);
+        TO_STRING(AA_ICP);
+        TO_STRING(FICP);
+        TO_STRING(RICP);
+        TO_STRING(PPL);
+        TO_STRING(RPPL);
+        TO_STRING(SparseICP);
+        TO_STRING(SICPPPL);
+        default:
+            return "Unknown";
+    }
 }
 
 template <typename T>
@@ -218,6 +239,7 @@ py::array_t<T> PY_FRICP<T>::run_icp(unsigned int method)
         return py::array_t<T>({4, 4});
     }    
     int dim = 3;
+    std::cout<< "Using method: " << enum_to_string(method) << std::endl;
 
     // scaling
     Eigen::Vector3d source_scale, target_scale;
@@ -344,7 +366,7 @@ py::array_t<T> PY_FRICP<T>::run_icp(unsigned int method)
     res_T.linear() = res_trans.block(0,0,3,3);
     res_T.translation() = res_trans.block(0,3,3,1);
     this->res_trans.block(0,3,3,1) *= scale;
-    std::cout << "res_T: " << this->res_trans << std::endl;
+    // std::cout << "res_T: " << this->res_trans << std::endl;
 
     py::array_t<T> py_result = py::array_t<T>({4, 4});
     py::buffer_info info = py_result.request();
