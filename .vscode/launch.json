@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CMake Debug",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/dependencies/Fast-Robust-ICP/build/FRICP", // CMake 构建的可执行文件路径
+            "args": [],                // 如果需要，可以在这里添加程序的命令行参数
+            "stopAtEntry": false,       // 是否在入口处暂停
+            "cwd": "${workspaceFolder}", // 工作目录，一般为项目的根目录
+            "environment": [],
+            "externalConsole": false,   // 使用集成终端进行调试
+            "MIMode": "gdb",            // 使用 GDB 作为调试器
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Add source file directory",
+                    "text": "directory ${workspaceFolder}/dependencies/Fast-Robust-ICP",  // 添加源代码目录路径
+                    "ignoreFailures": true
+                }
+            ],
+            "miDebuggerPath": "/usr/bin/gdb",  // GDB 的路径
+            "preLaunchTask": "",               // 如果需要构建，可以在这里添加构建任务
+            "internalConsoleOptions": "openOnSessionStart"
+        }
+    ]
+}
