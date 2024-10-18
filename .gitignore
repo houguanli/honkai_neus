@@ -9,7 +9,6 @@ __pycache__/
 *.so
 *.pyi
 
-data/
 .vscode/
 
 # Distribution / packaging

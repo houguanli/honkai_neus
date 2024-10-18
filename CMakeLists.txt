@@ -10,7 +10,7 @@ if(OPENMP_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
 endif()
 
-pybind11_add_module(py_fricp models/PY_FRICP.cpp)
+pybind11_add_module(py_fricp models/py_fricp.cpp)
 target_include_directories(py_fricp PRIVATE dependencies/Fast-Robust-ICP
                                             dependencies/Fast-Robust-ICP/include
                                             ${EIGEN3_INCLUDE_DIRS}

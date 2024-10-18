@@ -5,14 +5,16 @@ import open3d as o3d
 # Create a new instance of the Fricp class, for now only the double precision version is available
 fricp = py_fricp.PY_FRICPd()
 
+source_file = "./dependencies/Fast-Robust-ICP/data/source.ply"
+target_file = "./dependencies/Fast-Robust-ICP/data/target.ply"
 '''
 Method 1: Set the source and target point clouds using numpy arrays
 Make sure the numpy array is of shape (3, N) where N is the number of points
 Use the .T attribute to transpose the array if needed.
 '''
 # Load the source and target point clouds
-source = o3d.io.read_point_cloud("data/source.ply")
-target = o3d.io.read_point_cloud("data/target.ply")
+source = o3d.io.read_point_cloud(source_file)
+target = o3d.io.read_point_cloud(target_file)
 
 # convert the point clouds to numpy arrays
 # As the the point clouds read by the open3d library are already float64, we don't need to convert them,
@@ -29,9 +31,11 @@ fricp.set_points(source_point=source, target_point=target)
 
 '''
 Method 2: Give the path to the source and target point clouds
+The parameter should be string, a Pathlib object is not supported.
 The point clouds can be and only can be in .ply or .obj format
+Note that the .ply or .obj file must saved in ASCII format, binary format is not supported.
 '''
-# fricp.set_points_from_file("data/source.ply", "data/target.ply")
+# fricp.set_points_from_file(file_source=source_file, file_target=target_file)
 
 # result is a numpy array of shape (4, 4)
 result = fricp.run_icp(method=3)
