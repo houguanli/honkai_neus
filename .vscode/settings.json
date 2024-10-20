@@ -1,5 +1,5 @@
 {
-    "cmake.sourceDirectory": "/data2/hgl/neus_j/preprocess_custom_data/aruco_preprocess",
+    "cmake.sourceDirectory": "/workspace/honkai_neus",
     "files.associations": {
         "iostream": "cpp",
         "core": "cpp",
