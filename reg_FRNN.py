@@ -22,6 +22,7 @@ from frnn_helper import FRNN
 # target index does not move 
 # all raw RT and fine RT should be applied to source index
 # follow the logic with the robust icp
+seed = 20031012
 def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_count, with_fixed_camera=False,
                             camera_params_list=None, pic_mode="png"):  # assmue load from a json file
     print("---------------------Loading image data-------------------------------------")
@@ -329,6 +330,81 @@ class HonkaiStart(torch.nn.Module):
         global_loss = R_ek_loss + global_loss
         return global_loss, visited
     
+    def render_colored_single_ply(self, neus_index, vis_folder=None, images_total = -1): 
+        # render a colored ply for the final reg-result
+        if images_total < 0:
+            images_total = len(self.obj_masks[neus_index])  # as default
+        neus_standard = self.objects[neus_index]
+        points_all, colors_all = [], []
+        for image_index in range(0, images_total):
+            debug_rgb = []
+            rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
+            rays_mask = self.obj_masks[neus_index][image_index]
+            # reshape is used for after mask, it become [rays_sum*3]
+            rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[
+                rays_mask].reshape(-1, 3)
+            # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
+            current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
+            rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
+            rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
+            rays_special_mask_1d = rays_special_mask[:, 0]
+            if len(rays_o) > 0:  # have points exists in both-aviable area
+                for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size),
+                                                                     rays_d.split(self.batch_size)):
+                    near, far = neus_standard.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
+                    #just render to get color, do not use dynamic thing 
+                    render_out = neus_standard.renderer.render(rays_o=rays_o_batch, rays_d=rays_d_batch,near=near, far=far,
+                                                                cos_anneal_ratio=neus_standard.get_cos_anneal_ratio(),background_rgb=None)
+                    color_fine = render_out["color_fine"]
+                    debug_rgb.append(color_fine.clone().detach().cpu().numpy())
+                    torch.cuda.synchronize()
+                    del render_out
+                black_there_hold = 0
+                W, H, cnt_in_mask, cnt_in_rgb = self.W, self.H, 0, 0
+                debug_rgb = (np.concatenate(debug_rgb, axis=0).reshape(-1, 3) * 256).clip(0, 255).astype(np.uint8)
+                debug_img = np.zeros([H, W, 3]).astype(np.uint8)
+                # feed rendered result
+                for index in range(0, H):
+                    for j in range(0, W):
+                        if rays_mask[index][j]:  # in the mask of the dataset
+                            if rays_special_mask_1d[cnt_in_mask]:  # index cnt_in_mask also in the special mask
+                                if debug_rgb[cnt_in_rgb][0] > black_there_hold:
+                                    debug_img[index][j][0] = debug_rgb[cnt_in_rgb][0]  # store as in debug_image
+                                    debug_img[index][j][1] = debug_rgb[cnt_in_rgb][1]
+                                    debug_img[index][j][2] = debug_rgb[cnt_in_rgb][2]
+                                    debug_rgb2bgr = np.array([debug_rgb[cnt_in_rgb][2], debug_rgb[cnt_in_rgb][1], debug_rgb[cnt_in_rgb][0]])
+                                    # ensure only add colored points
+                                    colors_all.append(debug_rgb2bgr) # this is numpy, using debug_rgb2bgr
+                                    points_all.append(current_zero_sdf_points[cnt_in_rgb].clone().detach().cpu().numpy()) # correspond points in this 
+                                else:  # write unfitted rgb as white
+                                    debug_img[index][j][0] = 255
+                                    debug_img[index][j][1] = 255
+                                    debug_img[index][j][2] = 255
+                                cnt_in_rgb = cnt_in_rgb + 1
+                            else:  # outside the  special mask, highlighted as green
+                                debug_img[index][j][0] = 0
+                                debug_img[index][j][1] = 255
+                                debug_img[index][j][2] = 0
+                            cnt_in_mask = cnt_in_mask + 1
+                # print_blink("saving debug image with image inedex " + str(image_index))
+                # cv.imwrite((vis_folder / (str(image_index) + ".png")).as_posix(), debug_img)            
+            else:
+                continue
+            print_info("calc points with rgb at this index ", image_index)
+        if vis_folder is not None: # write out colored ply for debug
+            point_cloud = o3d.geometry.PointCloud() # auto write out
+            point_cloud.points = o3d.utility.Vector3dVector(np.asarray(points_all, dtype=np.float32))
+            point_cloud.colors = o3d.utility.Vector3dVector(np.array(colors_all, dtype=np.float32) / 255.0)
+            if not os.path.exists(vis_folder): # TODO: move this code to oulier function
+                os.makedirs(vis_folder)
+            vis_path = str(vis_folder) + "/" + str(neus_index) + ".ply"
+            o3d.io.write_point_cloud(vis_path, point_cloud, write_ascii=True)
+        return points_all, colors_all
+
+    def render_colored_merged_ply(self, source_index, target_index, vis_folder=None, images_total=-1):
+        source_ply = None
+        return
+    
 def get_optimizer(mode, honkaiStart):
     optimizer = None
     if  mode == "refine_rt":
@@ -388,16 +464,22 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/json/base.json')
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--vis_folder', type=str, default="debug/dragon2to1_AABB3")
+    parser.add_argument('--vis_folder', type=str, default="debug/dragon2_FRNN")
     parser.add_argument('--write_out', type=str, default=0)
+    parser.add_argument('--mode', type=str, default='refine_rt')
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
+    if args.mode == 'refine_rt':
+        refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
+    else:
+        honkaiStart.render_colored_single_ply(neus_index=1, vis_folder=Path(args.vis_folder))
 
 """
-python reg.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
-python reg_AABB.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
-python reg.py --conf ./confs/json/klee.json --write_out fast --gpu 3
+python reg_FRNN.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
+python reg_FRNN.py --conf ./confs/json/klee.json --write_out fast --gpu 3
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode ply --write_out fast --gpu 1
+
 """
     

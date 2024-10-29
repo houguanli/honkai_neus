@@ -5,8 +5,8 @@ import open3d as o3d
 # Create a new instance of the Fricp class, for now only the double precision version is available
 fricp = py_fricp.PY_FRICPd()
 
-source_file = "./dependencies/Fast-Robust-ICP/data/source.ply"
-target_file = "./dependencies/Fast-Robust-ICP/data/target.ply"
+source_file = "./dependencies/Fast-Robust-ICP/data/dragon2_to_1_raw.ply"
+target_file = "./dependencies/Fast-Robust-ICP/data/dragon1.ply"
 '''
 Method 1: Set the source and target point clouds using numpy arrays
 Make sure the numpy array is of shape (3, N) where N is the number of points
@@ -41,3 +41,7 @@ Note that the .ply or .obj file must saved in ASCII format, binary format is not
 result = fricp.run_icp(method=3)
 print("Transformation matrix shape: ", result.shape)
 print("Transformation matrix: \n", result)
+
+"""
+cp -r 
+"""
