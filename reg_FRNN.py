@@ -5,24 +5,21 @@ import cv2 as cv
 import torch
 import torch.nn.functional as F
 from icecream import ic
-from tqdm import trange
+import tqdm
 from models.common import *
 from argparse import ArgumentParser
 from exp_runner import Runner
 import time
-import math
 import trimesh
 import open3d as o3d
 from pathlib import Path
 import os
 import torch.nn as nn
-from AABB_helper import PointCloud2AABBTree
 from frnn_helper import FRNN
-
+from models.fields import * 
 # target index does not move 
 # all raw RT and fine RT should be applied to source index
 # follow the logic with the robust icp
-seed = 20031012
 def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_count, with_fixed_camera=False,
                             camera_params_list=None, pic_mode="png"):  # assmue load from a json file
     print("---------------------Loading image data-------------------------------------")
@@ -34,7 +31,6 @@ def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_
     else:   # not pre-defined list
         with open(camera_params_path, "r") as json_file:
             camera_params_list = json.load(json_file)
-
     images, masks, cameras_K, cameras_M = [], [], [], []  # cameras_M should be c2w mat
     for i in range(0, frames_count + 1):
         picture_name = f"{i:03}"
@@ -57,9 +53,7 @@ def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_
     return images, masks, cameras_K, cameras_M  # returns numpy arrays
 
 def generate_rays_with_K_and_M(transform_matrix, intrinsic_mat, W, H, resolution_level=1):  # transform mat should be c2w mat, and numpy as input
-    # transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to('cuda')  # add to cuda
     intrinsic_mat_inv = torch.inverse(intrinsic_mat)
-    # intrinsic_mat_inv = torch.from_numpy(intrinsic_mat_inv.astype(np.float32)).to('cuda')
     tx = torch.linspace(0, W - 1, W // resolution_level)
     ty = torch.linspace(0, H - 1, H // resolution_level)
     pixels_x, pixels_y = torch.meshgrid(tx, ty)
@@ -91,8 +85,7 @@ def generate_all_rays(imgs, masks, cameras_K, cameras_c2w, W_all, H_all):
         rays_v_all.append(rays_v)
         rays_gt_all.append(rays_gt)
         rays_mask_all.append(rays_mask)
-    # returns rays_o_all, rays_v_all, rays_gt_all, rays_mask_all formulate by frames
-    return rays_o_all, rays_v_all, rays_gt_all, rays_mask_all
+    return rays_o_all, rays_v_all, rays_gt_all, rays_mask_all  # returns formulate by frames
 
 def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"):
     # convert to 4X4 mat
@@ -116,7 +109,7 @@ def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"
     return points
     
 class HonkaiStart(torch.nn.Module):
-    def __init__(self, setting_json_path):
+    def __init__(self, setting_json_path, case_name='Elysia', is_continue=False):
         super(HonkaiStart, self).__init__()
         self.device = 'cuda'
         with open(setting_json_path, "r") as json_file:
@@ -150,6 +143,55 @@ class HonkaiStart(torch.nn.Module):
             self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
 
+        # Dstill
+        # create descendant network      
+        params_to_train = []
+        self.student_sdf_network = getDefaultSDF_Network() # same as neus init
+        params_to_train += list(self.student_sdf_network.parameters())
+        self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
+        self.is_continue = is_continue
+        
+        self.iter_step = 0
+        self.end_iter = 300000
+
+        self.report_freq = 100
+        self.save_freq = 10000
+        self.base_exp_dir = Path('exp') / 'distill' / case_name
+        self.learning_rate_alpha = 0.05
+        self.learning_rate = 5e-4
+
+        # Load checkpoint
+        latest_model_name = None
+        if is_continue:
+            model_list_raw = os.listdir(os.path.join(self.base_exp_dir, 'checkpoints'))
+            model_list = []
+            for model_name in model_list_raw:
+                if model_name[-3:] == 'pth' and int(model_name[5:-4]) <= self.end_iter:
+                    model_list.append(model_name)
+            model_list.sort()
+            latest_model_name = model_list[-1]
+        
+        if latest_model_name is not None:
+            logging.info('Find checkpoint: {}'.format(latest_model_name))
+            self.load_checkpoint(latest_model_name)
+
+    def save_checkpoint(self):
+        checkpoint = {
+            'sdf_network_fine': self.student_sdf_network.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'iter_step': self.iter_step,
+        }
+        os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
+        torch.save(checkpoint,
+                   os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
+
+    def load_checkpoint(self, checkpoint_name):
+        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name), map_location=self.device)
+        self.student_sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.iter_step = checkpoint['iter_step']
+
+        logging.info('End')
         
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
@@ -172,7 +214,6 @@ class HonkaiStart(torch.nn.Module):
         # generate random rays from the rays all, with rays_gt and rays_o, rays_d
         # assume this is generated within mask, and is the inter-section of the target 
         if is_random:
-        # TODO: generate random rays from rays all within the mask 
             random_indexes = torch.randint(low=0, high=self.W, size=[samples_num]) # reflect this indexes to rays_all
             return None
         else: # generate all rays within the mask for the specified image_index
@@ -193,7 +234,6 @@ class HonkaiStart(torch.nn.Module):
     def refine_rt_forward(self, source_index, target_index, vis_folder=None, write_out="full", iter_id = 0, 
                           images_total = -1, start_index=0, single_image_refine=False): # refine the rt from target_index to source_index
         # raw_quad, raw_trans are set from the init or the optimizer
-        # TODO:: select poses to make sure it is generate from a both-available area
         if images_total < 0:
             images_total = len(self.obj_masks[source_index]) # as default
         # print_info("running with ", images_total, "in total")
@@ -247,11 +287,6 @@ class HonkaiStart(torch.nn.Module):
                     threshold = 0.001  # below threshold value will be zeros, others will be ones
                     color_fine_01 =    torch.sigmoid((color_fine - threshold) * 6480.0)
                     rays_gt_01_batch = torch.sigmoid((rays_gt_batch - threshold) * 6480.0)
-                    # TODO: add sdf loss if necessary
-                    # sdfs_point_rt = neus_to_aligin.generate_zero_sdf_points_with_RT(rays_o=rays_o_batch, rays_d=rays_d_batch, T=self.raw_translation, R=self.raw_quaternion) 
-                    # # query those points' sdfs in standard neus
-                    # neus_standard.sdf_network.sdf(sdfs_point_rt)
-                    # mask_error = color_fine - rays_gt_batch
                     mask_error = (color_fine_01 - rays_gt_01_batch)
                     # mask_fine_loss = F.l1_loss(color_fine_01, torch.ones_like(color_fine_01),reduction='sum') / rays_sum / 3 # normalize within cnt 
                     mask_fine_loss = F.l1_loss(mask_error, torch.zeros_like(mask_error),reduction='sum') / rays_sum / 3.0 # normalize within cnt 
@@ -325,7 +360,6 @@ class HonkaiStart(torch.nn.Module):
                 global_loss = R_ek_loss + global_loss
                 return global_loss # return to optimize single
         R_ek_loss = torch.abs(torch.norm(self.raw_quaternion) - 1)
-        # print_blink("R_ek_loss ", str(R_ek_loss.clone().detach().cpu().numpy()))
         R_ek_loss.backward()
         global_loss = R_ek_loss + global_loss
         return global_loss, visited
@@ -395,7 +429,7 @@ class HonkaiStart(torch.nn.Module):
             point_cloud = o3d.geometry.PointCloud() # auto write out
             point_cloud.points = o3d.utility.Vector3dVector(np.asarray(points_all, dtype=np.float32))
             point_cloud.colors = o3d.utility.Vector3dVector(np.array(colors_all, dtype=np.float32) / 255.0)
-            if not os.path.exists(vis_folder): # TODO: move this code to oulier function
+            if not os.path.exists(vis_folder):
                 os.makedirs(vis_folder)
             vis_path = str(vis_folder) + "/" + str(neus_index) + ".ply"
             o3d.io.write_point_cloud(vis_path, point_cloud, write_ascii=True)
@@ -404,10 +438,111 @@ class HonkaiStart(torch.nn.Module):
     def render_colored_merged_ply(self, source_index, target_index, vis_folder=None, images_total=-1):
         source_ply = None
         return
+
+    # TODO: those functions need to be complete and test in the future
+    # genearte query points from teacher model and returns sdf points
+    def genrate_sample_sdfs_from_teacher_model(self, neus_index, sample_nums=512, genarate_option="mix", image_index=-1):
+        samples, sdfs = None, None
+        teacher_neus = self.objects[neus_index] # this is a packed runner
+        if genarate_option == "random": # random from the bbox
+            samples = None
+            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
+        elif genarate_option == "zero": # select from 0-surface
+            samples = None
+            sdfs = torch.zeros(sample_nums)
+        elif genarate_option == "mix": # mix sample, assmuing image index is legeal
+            rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
+            rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
+            rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
+            # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
+            current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
+            rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
+            rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
+            light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
+            samples_total, samples_per_ray = light_walk_distance.size(0), 10
+            means = light_walk_distance.repeat(samples_per_ray, 1)
+            std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
+            samples = torch.normal(means, std_devs)
+            samples = torch.clamp(samples, min=0)
+            for i in range(samples_total):
+                samples[:, i] = torch.clamp(samples[:, i], max=light_walk_distance[i])
+            samples.reshape(-1, 3)
+            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
+        return samples, sdfs
+    
+    def query_student_sdfs(self, pts: torch.Tensor):
+        sdf = self.student_sdf_network.sdf(pts).contiguous()
+        sdf_grad = self.student_sdf_network.gradient(pts).squeeze().contiguous()
+        return sdf, sdf_grad
+    
+    # the trained 
+    def distill_sdf_forward(self, sample_points, teacher_sdfs, batch_size = 512, n_samples = 128): # calc sdf loss and EK loss for the network where needs with no grad? 
+        student_sdfs_source = self.query_student_sdfs(sample_points)
+        student_sdfs_source_error = student_sdfs_source - teacher_sdfs
+        sdf_loss = F.l1_loss(student_sdfs_source_error, torch.zeros_like(student_sdfs_source_error),reduction='sum')  # calc sdf loss in neus_source
+        # calc ek_loss borrow from neus trainner & render
+        points_norm = torch.linalg.norm(sample_points, ord=2, dim=-1, keepdim=True).reshape(batch_size, n_samples)
+        gradients = self.student_sdf_network.gradient(sample_points).squeeze() 
+        relax_inside_sphere = (points_norm < 1.2).float().detach()
+        # Eikonal loss
+        gradient_error = (torch.linalg.norm(gradients.reshape(batch_size, n_samples, 3), ord=2,dim=-1) - 1.0) ** 2
+        Ek_loss = (relax_inside_sphere * gradient_error).sum() / (relax_inside_sphere.sum() + 1e-5)    
+        return {
+            'sdf_loss': sdf_loss,
+            "Ek_loss": Ek_loss
+        }
+    
+    def update_learning_rate(self):
+        if self.iter_step < 5000:
+            learning_factor = self.iter_step / 5000
+        else:
+            alpha = self.learning_rate_alpha
+            progress = (self.iter_step - 5000) / (self.end_iter - 5000)
+            learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - alpha) + alpha
+        for g in self.optimizer.param_groups:
+            g['lr'] = self.learning_rate * learning_factor
+
+    # TODO: pack a training function from honkai neus
+    def train_student_sdf(self):
+        self.update_learning_rate()
+        res_step = self.end_iter - self.iter_step
+        source_images_total, target_images_total = len(self.obj_masks[self.source_index]), len(self.obj_masks[self.target_index])
+        for iter_i in tqdm(range(res_step)):
+            if iter_i % 10 == 0:
+                # Using source NeuS as teacher
+                image_index = iter_i % source_images_total
+                samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
+            else:
+                # Using target Neus as teacher
+                image_index = iter_i % target_images_total
+                samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
+            res_out = self.distill_sdf_forward(sample_points=samples, teacher_sdfs=sdfs)
+            ek_loss = res_out['Ek_loss']
+            sdf_loss = res_out['sdf_loss']
+            loss = ek_loss + sdf_loss
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.iter_step += 1
+
+            if self.iter_step % self.report_freq == 0:
+                print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
+            if self.iter_step % self.save_freq == 0:
+                self.save_checkpoint()
+            
+            self.update_learning_rate()
     
 def get_optimizer(mode, honkaiStart):
     optimizer = None
     if  mode == "refine_rt":
+        optimizer = torch.optim.Adam(
+            [
+                {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 3e-5},
+                {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 3e-5},
+            ],
+            amsgrad=False
+        )
+    elif mode == "distill":
         optimizer = torch.optim.Adam(
             [
                 {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 3e-5},
@@ -432,7 +567,7 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
         return loss, visited   
     optimizer = get_optimizer('refine_rt', honkaiStart=honkaiStart)
     train_iters = honkaiStart.train_iters
-    pbar = trange(0, train_iters)
+    pbar = tqdm.trange(0, train_iters)
     img_len = len(honkaiStart.objects[honkaiStart.source_index].dataset.images)
     for i in pbar:
         if single_image_refine: 
@@ -469,17 +604,21 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=str, default='refine_rt')
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
-    honkaiStart = HonkaiStart(args.conf)    
+    honkaiStart = HonkaiStart(args.conf)
     if args.mode == 'refine_rt':
         refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
-    else:
+    elif args.mode == "render_ply":
         honkaiStart.render_colored_single_ply(neus_index=1, vis_folder=Path(args.vis_folder))
+    elif args.mode == "distill":
+        honkaiStart.train_student_sdf()
+    seed = 20031012
+    
 
 """
 python reg_FRNN.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2 
 python reg_FRNN.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
-python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode ply --write_out fast --gpu 1
-
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode render_ply --write_out fast --gpu 1
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode distill --write_out fast --gpu 1
 """
     

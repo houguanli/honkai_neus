@@ -216,16 +216,11 @@ class NeuSRenderer:
         pts = pts.reshape(-1, 3)
         dirs = dirs.reshape(-1, 3)
 
-        # import time
-        # t_begin = time.time()
         sdf_nn_output = sdf_network(pts)
         sdf = sdf_nn_output[:, :1]
         feature_vector = sdf_nn_output[:, 1:]
         gradients = sdf_network.gradient(pts).squeeze()
-        # t_end = time.time()
-        # print('sdf_network time: {}'.format(t_end - t_begin))
-        # import pdb
-        # pdb.set_trace()
+
         sampled_color = color_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, 3)
 
         inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)  # Single parameter
@@ -264,10 +259,7 @@ class NeuSRenderer:
 
         weights = alpha * torch.cumprod(torch.cat([torch.ones([batch_size, 1]), 1. - alpha + 1e-7], -1), -1)[:, :-1]
         weights_sum = weights.sum(dim=-1, keepdim=True)
-
-        depth_map = torch.sum(weights * z_vals, dim=-1, keepdim=True)
-        disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
-
+        
         color = (sampled_color * weights[:, :, None]).sum(dim=1)
         if background_rgb is not None:  # Fixed background, usually black
             color = color + background_rgb * (1.0 - weights_sum)
@@ -281,8 +273,6 @@ class NeuSRenderer:
             'color': color,
             'sdf': sdf,
             'dists': dists,
-            'depth_map': depth_map,
-            'disp_map': disp_map,
             'gradients': gradients.reshape(batch_size, n_samples, 3),
             's_val': 1.0 / inv_s,
             'mid_z_vals': mid_z_vals,
