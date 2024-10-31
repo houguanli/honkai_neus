@@ -603,7 +603,7 @@ if __name__ == '__main__':
     parser.add_argument('--write_out', type=str, default=0)
     parser.add_argument('--mode', type=str, default='refine_rt')
     args = parser.parse_args()
-    torch.cuda.set_device(args.gpu) 
+    torch.cuda.set_device(args.gpu)
     honkaiStart = HonkaiStart(args.conf)
     if args.mode == 'refine_rt':
         refine_rt(honkaiStart=honkaiStart, vis_folder= Path(args.vis_folder), single_image_refine=True, write_out=args.write_out)
@@ -619,6 +619,6 @@ python reg_FRNN.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2
 python reg_FRNN.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
 python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode render_ply --write_out fast --gpu 1
-python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode distill --write_out fast --gpu 1
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode distill --gpu 1
 """
     
