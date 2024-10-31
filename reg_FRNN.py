@@ -148,7 +148,6 @@ class HonkaiStart(torch.nn.Module):
         params_to_train = []
         self.student_sdf_network = getDefaultSDF_Network() # same as neus init
         params_to_train += list(self.student_sdf_network.parameters())
-        self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
         self.is_continue = is_continue
         
         self.iter_step = 0
@@ -159,6 +158,8 @@ class HonkaiStart(torch.nn.Module):
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
+
+        self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
         # Load checkpoint
         latest_model_name = None
@@ -442,33 +443,36 @@ class HonkaiStart(torch.nn.Module):
     # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
     def genrate_sample_sdfs_from_teacher_model(self, neus_index, sample_nums=512, genarate_option="mix", image_index=-1):
-        samples, sdfs = None, None
-        teacher_neus = self.objects[neus_index] # this is a packed runner
-        if genarate_option == "random": # random from the bbox
-            samples = None
-            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
-        elif genarate_option == "zero": # select from 0-surface
-            samples = None
-            sdfs = torch.zeros(sample_nums)
-        elif genarate_option == "mix": # mix sample, assmuing image index is legeal
-            rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
-            rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
-            rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
-            # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
-            current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
-            rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
-            rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
-            light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
-            samples_total, samples_per_ray = light_walk_distance.size(0), 10
-            means = light_walk_distance.repeat(samples_per_ray, 1)
-            std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
-            samples = torch.normal(means, std_devs)
-            samples = torch.clamp(samples, min=0)
-            for i in range(samples_total):
-                samples[:, i] = torch.clamp(samples[:, i], max=light_walk_distance[i])
-            samples.reshape(-1, 3)
-            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
-        return samples, sdfs
+        with torch.no_grad():
+            samples, sdfs, samples3d = None, None, None
+            teacher_neus = self.objects[neus_index] # this is a packed runner
+            if genarate_option == "random": # random from the bbox
+                samples = None
+                sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
+            elif genarate_option == "zero": # select from 0-surface
+                samples = None
+                sdfs = torch.zeros(sample_nums)
+            elif genarate_option == "mix": # mix sample, assmuing image index is legeal
+                rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
+                rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
+                rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
+                # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
+                current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
+                rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
+                rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
+                light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
+                samples_total, samples_per_ray = light_walk_distance.size(0), 1
+                means = light_walk_distance.repeat(samples_per_ray, 1)
+                std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
+                samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
+                samples = torch.clamp(samples, min=0)
+                for i in range(samples_total):
+                    for j in range(samples_per_ray):
+                        samples[i * samples_per_ray + j, :] = torch.clamp(samples[i * samples_per_ray + j, :], max=light_walk_distance[i])
+                        samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
+                        # import pdb; pdb.set_trace()
+                sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
+            return samples3d, sdfs
     
     def query_student_sdfs(self, pts: torch.Tensor):
         sdf = self.student_sdf_network.sdf(pts).contiguous()
@@ -477,15 +481,15 @@ class HonkaiStart(torch.nn.Module):
     
     # the trained 
     def distill_sdf_forward(self, sample_points, teacher_sdfs, batch_size = 512, n_samples = 128): # calc sdf loss and EK loss for the network where needs with no grad? 
-        student_sdfs_source = self.query_student_sdfs(sample_points)
+        student_sdfs_source, _ = self.query_student_sdfs(sample_points)
         student_sdfs_source_error = student_sdfs_source - teacher_sdfs
         sdf_loss = F.l1_loss(student_sdfs_source_error, torch.zeros_like(student_sdfs_source_error),reduction='sum')  # calc sdf loss in neus_source
         # calc ek_loss borrow from neus trainner & render
-        points_norm = torch.linalg.norm(sample_points, ord=2, dim=-1, keepdim=True).reshape(batch_size, n_samples)
+        points_norm = torch.linalg.norm(sample_points, ord=2, dim=-1, keepdim=True)
         gradients = self.student_sdf_network.gradient(sample_points).squeeze() 
         relax_inside_sphere = (points_norm < 1.2).float().detach()
         # Eikonal loss
-        gradient_error = (torch.linalg.norm(gradients.reshape(batch_size, n_samples, 3), ord=2,dim=-1) - 1.0) ** 2
+        gradient_error = (torch.linalg.norm(gradients, ord=2,dim=-1) - 1.0) ** 2
         Ek_loss = (relax_inside_sphere * gradient_error).sum() / (relax_inside_sphere.sum() + 1e-5)    
         return {
             'sdf_loss': sdf_loss,
@@ -507,7 +511,7 @@ class HonkaiStart(torch.nn.Module):
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
         source_images_total, target_images_total = len(self.obj_masks[self.source_index]), len(self.obj_masks[self.target_index])
-        for iter_i in tqdm(range(res_step)):
+        for iter_i in tqdm.tqdm(range(res_step)):
             if iter_i % 10 == 0:
                 # Using source NeuS as teacher
                 image_index = iter_i % source_images_total
@@ -517,6 +521,7 @@ class HonkaiStart(torch.nn.Module):
                 image_index = iter_i % target_images_total
                 samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
             res_out = self.distill_sdf_forward(sample_points=samples, teacher_sdfs=sdfs)
+            import pdb; pdb.set_trace()
             ek_loss = res_out['Ek_loss']
             sdf_loss = res_out['sdf_loss']
             loss = ek_loss + sdf_loss

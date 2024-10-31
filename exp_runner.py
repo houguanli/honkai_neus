@@ -64,7 +64,6 @@ class Runner:
         params_to_train = []
         self.nerf_outside = NeRF(**self.conf['model.nerf']).to(self.device)
         self.sdf_network = SDFNetwork(**self.conf['model.sdf_network']).to(self.device)
-        import pdb; pdb.set_trace()
         self.deviation_network = SingleVarianceNetwork(**self.conf['model.variance_network']).to(self.device)
         self.color_network = RenderingNetwork(**self.conf['model.rendering_network']).to(self.device)
         params_to_train += list(self.nerf_outside.parameters())
