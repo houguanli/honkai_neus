@@ -261,3 +261,21 @@ class SingleVarianceNetwork(nn.Module):
 
     def forward(self, x):
         return torch.ones([len(x), 1]) * torch.exp(self.variance * 10.0)
+
+
+
+def getDefaultSDF_Network():
+    settings = {
+        "d_out" : 257,
+        "d_in" : 3,
+        "d_hidden" : 256,
+        "n_layers" : 8,
+        "skip_in" : [4],
+        "multires" : 6,
+        "bias" : 0.5,
+        "scale" : 3.0,
+        "geometric_init" : True,
+        "weight_norm" : True 
+        }
+    sdf_network = SDFNetwork(**settings)
+    return sdf_network 

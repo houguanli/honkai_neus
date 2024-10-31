@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 import torch
 import time
+import models.py_fricp
 
 def run_on_gpu(memory_size_gb, run_time_seconds):
     # 设置要占用的内存大小（以字节为单位）
@@ -30,7 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=0)
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
-    run_on_gpu(memory_size_gb=9 , run_time_seconds=60000)
+    run_on_gpu(memory_size_gb=9 , run_time_seconds=1)
 
 """
 python gen.py 
