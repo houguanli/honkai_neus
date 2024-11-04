@@ -123,7 +123,7 @@ class Runner:
             render_out = self.renderer.render(rays_o, rays_d, near, far,
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
-
+            print("samples ", len(rays_o))
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
@@ -733,6 +733,7 @@ python exp_runner.py --mode validate_mesh --conf ./confs/thin_structure.conf --c
 python exp_runner.py --mode validate_image --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
 python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --case soap2_merge --is_continue --gpu 5
 python exp_runner.py --mode train --conf ./confs/thin_structure_white_bkgd.conf --case bunny2
+python exp_runner.py --mode train --conf ./confs/thin_structure_white_bkgd.conf --case dragon_pos1
 python exp_runner.py --mode render_rtkm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case tree
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 2 --case bunny_stand
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 3 --case dragon_pos1 --store_dir ./exp/dragon_pos1

@@ -363,13 +363,13 @@ class NeuSRenderer:
         weights_sum = weights.sum(dim=-1, keepdim=True)
         gradients = ret_fine['gradients']
         s_val = ret_fine['s_val'].reshape(batch_size, n_samples).mean(dim=-1, keepdim=True)
-        depth_map = ret_fine['depth_map']
-        disp_map = ret_fine['disp_map']
+        # depth_map = ret_fine['depth_map']
+        # disp_map = ret_fine['disp_map']
         
         return {
             'color_fine': color_fine,
-            'depth_map': depth_map,
-            'disp_map': disp_map,
+            # 'depth_map': depth_map,
+            # 'disp_map': disp_map,
             's_val': s_val,
             'cdf_fine': ret_fine['cdf'],
             'weight_sum': weights_sum,
@@ -438,3 +438,5 @@ class NeuSRenderer:
                                 resolution=resolution,
                                 threshold=threshold,
                                 query_func=lambda pts: -self.sdf_network.sdf(pts))
+    
+    

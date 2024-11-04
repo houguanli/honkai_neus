@@ -17,6 +17,7 @@ import os
 import torch.nn as nn
 from frnn_helper import FRNN
 from models.fields import * 
+from models.renderer import extract_fields, extract_geometry
 # target index does not move 
 # all raw RT and fine RT should be applied to source index
 # follow the logic with the robust icp
@@ -107,7 +108,7 @@ def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"
     points = torch.matmul(transform_matrix[None, :3, :3], points[:, :, None]).squeeze(dim=-1)  # N, 3
     points = points + transform_matrix[None, :3, 3]
     return points
-    
+
 class HonkaiStart(torch.nn.Module):
     def __init__(self, setting_json_path, case_name='Elysia', is_continue=False):
         super(HonkaiStart, self).__init__()
@@ -151,13 +152,14 @@ class HonkaiStart(torch.nn.Module):
         self.is_continue = is_continue
         
         self.iter_step = 0
-        self.end_iter = 300000
-
-        self.report_freq = 100
-        self.save_freq = 10000
+        self.end_iter = 5000
+        self.sdf_batch_size = reg_data['sdf_batch_size']
+        self.report_freq = 50
+        self.save_freq = 500
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
+        self.igr_weight = 0.1
 
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
@@ -384,8 +386,7 @@ class HonkaiStart(torch.nn.Module):
             rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
             rays_special_mask_1d = rays_special_mask[:, 0]
             if len(rays_o) > 0:  # have points exists in both-aviable area
-                for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size),
-                                                                     rays_d.split(self.batch_size)):
+                for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size),rays_d.split(self.batch_size)):
                     near, far = neus_standard.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
                     #just render to get color, do not use dynamic thing 
                     render_out = neus_standard.renderer.render(rays_o=rays_o_batch, rays_d=rays_d_batch,near=near, far=far,
@@ -436,10 +437,6 @@ class HonkaiStart(torch.nn.Module):
             o3d.io.write_point_cloud(vis_path, point_cloud, write_ascii=True)
         return points_all, colors_all
 
-    def render_colored_merged_ply(self, source_index, target_index, vis_folder=None, images_total=-1):
-        source_ply = None
-        return
-
     # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
     def genrate_sample_sdfs_from_teacher_model(self, neus_index, sample_nums=512, genarate_option="mix", image_index=-1):
@@ -461,11 +458,12 @@ class HonkaiStart(torch.nn.Module):
                 rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
                 rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
                 light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
-                samples_total, samples_per_ray = light_walk_distance.size(0), 1
+                samples_total, samples_per_ray = light_walk_distance.size(0), 10
                 means = light_walk_distance.repeat(samples_per_ray, 1)
                 std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
                 samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
                 samples = torch.clamp(samples, min=0)
+                
                 for i in range(samples_total):
                     for j in range(samples_per_ray):
                         samples[i * samples_per_ray + j, :] = torch.clamp(samples[i * samples_per_ray + j, :], max=light_walk_distance[i])
@@ -480,7 +478,7 @@ class HonkaiStart(torch.nn.Module):
         return sdf, sdf_grad
     
     # the trained 
-    def distill_sdf_forward(self, sample_points, teacher_sdfs, batch_size = 512, n_samples = 128): # calc sdf loss and EK loss for the network where needs with no grad? 
+    def distill_sdf_forward(self, sample_points, teacher_sdfs): # calc sdf loss and EK loss for the network where needs with no grad? 
         student_sdfs_source, _ = self.query_student_sdfs(sample_points)
         student_sdfs_source_error = student_sdfs_source - teacher_sdfs
         sdf_loss = F.l1_loss(student_sdfs_source_error, torch.zeros_like(student_sdfs_source_error),reduction='sum')  # calc sdf loss in neus_source
@@ -511,32 +509,60 @@ class HonkaiStart(torch.nn.Module):
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
         source_images_total, target_images_total = len(self.obj_masks[self.source_index]), len(self.obj_masks[self.target_index])
-        for iter_i in tqdm.tqdm(range(res_step)):
-            if iter_i % 10 == 0:
-                # Using source NeuS as teacher
-                image_index = iter_i % source_images_total
-                samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
-            else:
-                # Using target Neus as teacher
-                image_index = iter_i % target_images_total
-                samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
-            res_out = self.distill_sdf_forward(sample_points=samples, teacher_sdfs=sdfs)
-            import pdb; pdb.set_trace()
-            ek_loss = res_out['Ek_loss']
-            sdf_loss = res_out['sdf_loss']
-            loss = ek_loss + sdf_loss
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            self.iter_step += 1
-
-            if self.iter_step % self.report_freq == 0:
-                print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
-            if self.iter_step % self.save_freq == 0:
-                self.save_checkpoint()
-            
-            self.update_learning_rate()
+        process_bar = tqdm.tqdm(total=res_step)
+        iter_i = 0
+        while iter_i < res_step:
+            with torch.no_grad():
+                if iter_i % 2 == -1: # swtich the teacher neus for each step
+                    # Using source NeuS as teacher
+                    image_index = iter_i % source_images_total
+                    samples_source, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
+                    transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+                    samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
+                    T1_expand = (transform_matrix[0:3, 3]).repeat(len(samples_source), 1)
+                    samples = samples_source__ + T1_expand# notice its important to apply transformation to samples so that we can align those points to target axis
+                else:
+                    # Using target Neus as teacher
+                    image_index = iter_i % target_images_total
+                    samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
+            print_info("sampling with points ", len(samples))
+            # bachtify this process
+            for samples_batch, sdfs_batch in zip(samples.split(self.sdf_batch_size), sdfs.split(self.sdf_batch_size)):
+                res_out = self.distill_sdf_forward(sample_points=samples_batch, teacher_sdfs=sdfs_batch)
+                # import pdb; pdb.set_trace()
+                ek_loss = res_out['Ek_loss'] / len(samples_batch) * 10
+                sdf_loss = res_out['sdf_loss'] / len(samples_batch) * 10  # unify 
+                loss = ek_loss * self.igr_weight + sdf_loss 
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                self.iter_step += 1
+                iter_i += 1
+                process_bar.update(1)
+                if self.iter_step % self.report_freq == 0:
+                    print('iter:{:8>d} loss = {} sdf_loss = {} ek_Loss = {} lr={}'.format(self.iter_step, loss, sdf_loss, ek_loss, self.optimizer.param_groups[0]['lr']))
+                if self.iter_step % self.save_freq == 0:
+                    self.save_checkpoint()
+                if self.iter_step % self.save_freq == 0:
+                    self.validate_student_mesh()
+                self.update_learning_rate()
+        process_bar.close()
     
+    def validate_student_mesh(self, world_space=False, resolution=256, threshold=0.0):
+        bound_min = torch.tensor([-1.0,-1.0,-1.0], dtype=torch.float32)
+        bound_max = torch.tensor([1.0,1.0,1.0], dtype=torch.float32)
+        vertices, triangles = \
+            extract_geometry(bound_min,
+                                  bound_max, 
+                                  resolution=resolution, 
+                                  threshold=threshold,
+                                  query_func=lambda pts: -self.student_sdf_network.sdf(pts))
+        os.makedirs(os.path.join(self.base_exp_dir, 'meshes'), exist_ok=True)
+
+        mesh = trimesh.Trimesh(vertices, triangles)
+        mesh.export(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)), encoding='ascii')
+        print("save at " + os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
+
 def get_optimizer(mode, honkaiStart):
     optimizer = None
     if  mode == "refine_rt":
