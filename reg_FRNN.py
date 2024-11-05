@@ -160,7 +160,7 @@ class HonkaiStart(torch.nn.Module):
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
         self.igr_weight = 0.1
-
+        
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
         # Load checkpoint
@@ -440,38 +440,42 @@ class HonkaiStart(torch.nn.Module):
     # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
     def genrate_sample_sdfs_from_teacher_model(self, neus_index, sample_nums=512, genarate_option="mix", image_index=-1):
-        with torch.no_grad():
-            samples, sdfs, samples3d = None, None, None
-            teacher_neus = self.objects[neus_index] # this is a packed runner
-            if genarate_option == "random": # random from the bbox
-                samples = None
-                sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
-            elif genarate_option == "zero": # select from 0-surface
-                samples = None
-                sdfs = torch.zeros(sample_nums)
-            elif genarate_option == "mix": # mix sample, assmuing image index is legeal
-                rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
-                rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
-                rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
-                # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
-                current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
-                rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
-                rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
-                light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
-                samples_total, samples_per_ray = light_walk_distance.size(0), 10
-                means = light_walk_distance.repeat(samples_per_ray, 1)
-                std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
-                samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
-                samples = torch.clamp(samples, min=0)
-                
-                for i in range(samples_total):
-                    for j in range(samples_per_ray):
-                        samples[i * samples_per_ray + j, :] = torch.clamp(samples[i * samples_per_ray + j, :], max=light_walk_distance[i])
-                        samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
-                        # import pdb; pdb.set_trace()
-                sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
-            return samples3d, sdfs
-    
+        samples, sdfs, samples3d = None, None, None
+        teacher_neus = self.objects[neus_index] # this is a packed runner
+        if genarate_option == "random": # random from the bbox
+            samples = None
+            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
+        elif genarate_option == "zero": # select from 0-surface
+            samples = None
+            sdfs = torch.zeros(sample_nums)
+        elif genarate_option == "mix": # mix sample, assmuing image index is legeal
+            rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
+            rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
+            rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
+            # mask again because some edge points does not reached the zero sdf surface, notice that current_zero_sdf_points has been masked
+            current_zero_sdf_points = self.zero_sdf_points_all[neus_index][image_index] # zero sdf points from the camera rays o for the object of [source_index]， 
+            rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
+            rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
+            light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
+            samples_total, samples_per_ray = light_walk_distance.size(0), 10
+            means = light_walk_distance.repeat(samples_per_ray, 1)
+            std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
+            samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
+            samples = torch.clamp(samples, min=0)
+            light_walk_distance = light_walk_distance.repeat_interleave(samples_per_ray, dim=0)
+            samples = torch.clamp(samples, max=light_walk_distance)
+            rays_o = rays_o.repeat_interleave(samples_per_ray, dim=0)
+            rays_d = rays_d.repeat_interleave(samples_per_ray, dim=0)
+            samples3d = rays_o + rays_d * samples
+            # for i in range(samples_total):
+            #     for j in range(samples_per_ray):
+            #         samples[i * samples_per_ray + j, :] = torch.clamp(samples[i * samples_per_ray + j, :], max=light_walk_distance[i])
+            #         samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
+            #         # import pdb; pdb.set_trace()
+            sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
+            print("sampled with ", samples3d.shape, " points")
+        return samples3d, sdfs
+
     def query_student_sdfs(self, pts: torch.Tensor):
         sdf = self.student_sdf_network.sdf(pts).contiguous()
         sdf_grad = self.student_sdf_network.gradient(pts).squeeze().contiguous()
