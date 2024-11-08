@@ -152,10 +152,10 @@ class HonkaiStart(torch.nn.Module):
         self.is_continue = is_continue
         
         self.iter_step = 0
-        self.end_iter = 5000
+        self.end_iter = 50000
         self.sdf_batch_size = reg_data['sdf_batch_size']
-        self.report_freq = 50
-        self.save_freq = 500
+        self.report_freq = 500
+        self.save_freq = 5000
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
@@ -439,7 +439,7 @@ class HonkaiStart(torch.nn.Module):
 
     # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
-    def genrate_sample_sdfs_from_teacher_model(self, neus_index, sample_nums=512, genarate_option="mix", image_index=-1):
+    def generate_sample_sdfs_from_teacher_model(self, neus_index : int, sample_nums=512, genarate_option="mix", image_index=-1):
         samples, sdfs, samples3d = None, None, None
         teacher_neus = self.objects[neus_index] # this is a packed runner
         if genarate_option == "random": # random from the bbox
@@ -457,9 +457,10 @@ class HonkaiStart(torch.nn.Module):
             rays_special_mask = self.zero_sdf_points_all_mask[neus_index][image_index]
             rays_o, rays_d, rays_gt = rays_o[rays_special_mask].reshape(-1, 3), rays_d[rays_special_mask].reshape(-1,3), rays_gt[rays_special_mask].reshape(-1, 3)
             light_walk_distance = torch.norm(current_zero_sdf_points - rays_o, dim=1, keepdim=True) # what shape
+
             samples_total, samples_per_ray = light_walk_distance.size(0), 10
             means = light_walk_distance.repeat(samples_per_ray, 1)
-            std_devs = (light_walk_distance / 3).repeat(samples_per_ray, 1)
+            std_devs = (light_walk_distance / 20).repeat(samples_per_ray, 1)
             samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
             samples = torch.clamp(samples, min=0)
             light_walk_distance = light_walk_distance.repeat_interleave(samples_per_ray, dim=0)
@@ -473,7 +474,8 @@ class HonkaiStart(torch.nn.Module):
             #         samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
             #         # import pdb; pdb.set_trace()
             sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
-            print("sampled with ", samples3d.shape, " points")
+            # import pdb; pdb.set_trace()
+            # print("sampled with ", samples3d.shape, " points")
         return samples3d, sdfs
 
     def query_student_sdfs(self, pts: torch.Tensor):
@@ -508,29 +510,50 @@ class HonkaiStart(torch.nn.Module):
         for g in self.optimizer.param_groups:
             g['lr'] = self.learning_rate * learning_factor
 
+    def find_latest_ckpt_name(self):
+        latest_model_name = None
+        model_list_raw = os.listdir(os.path.join(self.base_exp_dir, 'checkpoints'))
+        model_list = []
+        for model_name in model_list_raw:
+            if model_name[-3:] == 'pth' and int(model_name[5:-4]) <= self.end_iter:
+                model_list.append(model_name)
+        model_list.sort()
+        latest_model_name = model_list[-1]
+
+        return latest_model_name
+
     # TODO: pack a training function from honkai neus
-    def train_student_sdf(self):
+    def train_student_sdf(self, is_continue=False):
+        if is_continue:
+            # load ckpt in training:
+            ckpt_name = self.find_latest_ckpt_name()
+            if ckpt_name is not None:
+                self.load_checkpoint(ckpt_name)
+            else:
+                print_error("no ckpt is found")       
         self.update_learning_rate()
+
         res_step = self.end_iter - self.iter_step
         source_images_total, target_images_total = len(self.obj_masks[self.source_index]), len(self.obj_masks[self.target_index])
         process_bar = tqdm.tqdm(total=res_step)
+
         iter_i = 0
         while iter_i < res_step:
             with torch.no_grad():
-                if iter_i % 2 == -1: # swtich the teacher neus for each step
+                if iter_i % 2 == 0: # swtich the teacher neus for each step
                     # Using source NeuS as teacher
-                    image_index = iter_i % source_images_total
-                    samples_source, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
+                    image_index = (iter_i // 2) % source_images_total 
+                    samples_source, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
                     transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
                     samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
                     T1_expand = (transform_matrix[0:3, 3]).repeat(len(samples_source), 1)
-                    samples = samples_source__ + T1_expand# notice its important to apply transformation to samples so that we can align those points to target axis
+                    samples = samples_source__ + T1_expand # notice its important to apply transformation to samples so that we can align those points to target axis
                 else:
                     # Using target Neus as teacher
-                    image_index = iter_i % target_images_total
-                    samples, sdfs = self.genrate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
+                    image_index = (iter_i // 2) % target_images_total 
+                    samples, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
             print_info("sampling with points ", len(samples))
-            # bachtify this process
+            # batching this process
             for samples_batch, sdfs_batch in zip(samples.split(self.sdf_batch_size), sdfs.split(self.sdf_batch_size)):
                 res_out = self.distill_sdf_forward(sample_points=samples_batch, teacher_sdfs=sdfs_batch)
                 # import pdb; pdb.set_trace()
@@ -545,16 +568,26 @@ class HonkaiStart(torch.nn.Module):
                 process_bar.update(1)
                 if self.iter_step % self.report_freq == 0:
                     print('iter:{:8>d} loss = {} sdf_loss = {} ek_Loss = {} lr={}'.format(self.iter_step, loss, sdf_loss, ek_loss, self.optimizer.param_groups[0]['lr']))
+
                 if self.iter_step % self.save_freq == 0:
                     self.save_checkpoint()
+                    #also save sample points as debug
+                    point_cloud, store_path = o3d.geometry.PointCloud(), "./debug/test_samples" + str(iter_i) + ".ply"
+                    point_cloud.points = o3d.utility.Vector3dVector(samples.clone().detach().cpu().numpy())
+                    o3d.io.write_point_cloud(store_path, point_cloud)
                 if self.iter_step % self.save_freq == 0:
                     self.validate_student_mesh()
                 self.update_learning_rate()
         process_bar.close()
     
-    def validate_student_mesh(self, world_space=False, resolution=256, threshold=0.0):
-        bound_min = torch.tensor([-1.0,-1.0,-1.0], dtype=torch.float32)
-        bound_max = torch.tensor([1.0,1.0,1.0], dtype=torch.float32)
+    def validate_student_mesh(self, world_space=False, resolution=256, threshold=0.0, is_continue=False, bound_min=None, bound_max=None):
+        if bound_min is None: 
+            bound_min = torch.tensor([-0.1,-0.1,-0.1], dtype=torch.float32)
+            bound_max = torch.tensor([0.1,0.1,0.1], dtype=torch.float32)
+        if is_continue:
+            # load ckpt in training:
+            ss = 1
+
         vertices, triangles = \
             extract_geometry(bound_min,
                                   bound_max, 
@@ -645,6 +678,8 @@ if __name__ == '__main__':
     elif args.mode == "render_ply":
         honkaiStart.render_colored_single_ply(neus_index=1, vis_folder=Path(args.vis_folder))
     elif args.mode == "distill":
+        honkaiStart.train_student_sdf()
+    elif args.mode == "validate":
         honkaiStart.train_student_sdf()
     seed = 20031012
     

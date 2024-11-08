@@ -273,7 +273,7 @@ def getDefaultSDF_Network():
         "skip_in" : [4],
         "multires" : 6,
         "bias" : 0.5,
-        "scale" : 3.0,
+        "scale" : 12.0,
         "geometric_init" : True,
         "weight_norm" : True 
         }
