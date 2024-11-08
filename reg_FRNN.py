@@ -152,14 +152,15 @@ class HonkaiStart(torch.nn.Module):
         self.is_continue = is_continue
         
         self.iter_step = 0
-        self.end_iter = 50000
+        self.end_iter = 500000
         self.sdf_batch_size = reg_data['sdf_batch_size']
         self.report_freq = 500
-        self.save_freq = 5000
+        self.validate_freq = 5000
+        self.save_freq = 50000
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
-        self.igr_weight = 0.1
+        self.igr_weight = 0.01
         
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
@@ -189,10 +190,15 @@ class HonkaiStart(torch.nn.Module):
                    os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
 
     def load_checkpoint(self, checkpoint_name):
+            
         checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name), map_location=self.device)
         self.student_sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
+        if checkpoint_name == "ckpt_300000.pth": # a debug neus teacher ckpt
+            print_blink("load 30w sp ckpt from teacher neus")
+            self.student_sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
+            return
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
 
         logging.info('End')
         
@@ -460,7 +466,7 @@ class HonkaiStart(torch.nn.Module):
 
             samples_total, samples_per_ray = light_walk_distance.size(0), 10
             means = light_walk_distance.repeat(samples_per_ray, 1)
-            std_devs = (light_walk_distance / 20).repeat(samples_per_ray, 1)
+            std_devs = (light_walk_distance / 100).repeat(samples_per_ray, 1) # 0.01 stdv
             samples, samples3d = torch.normal(means, std_devs), torch.empty(samples_total * samples_per_ray, 3)
             samples = torch.clamp(samples, min=0)
             light_walk_distance = light_walk_distance.repeat_interleave(samples_per_ray, dim=0)
@@ -485,16 +491,17 @@ class HonkaiStart(torch.nn.Module):
     
     # the trained 
     def distill_sdf_forward(self, sample_points, teacher_sdfs): # calc sdf loss and EK loss for the network where needs with no grad? 
-        student_sdfs_source, _ = self.query_student_sdfs(sample_points)
+        student_sdfs_source, student_sdfs_gradiant = self.query_student_sdfs(sample_points)
         student_sdfs_source_error = student_sdfs_source - teacher_sdfs
         sdf_loss = F.l1_loss(student_sdfs_source_error, torch.zeros_like(student_sdfs_source_error),reduction='sum')  # calc sdf loss in neus_source
         # calc ek_loss borrow from neus trainner & render
         points_norm = torch.linalg.norm(sample_points, ord=2, dim=-1, keepdim=True)
-        gradients = self.student_sdf_network.gradient(sample_points).squeeze() 
+        gradients = self.student_sdf_network.gradient(sample_points).squeeze().contiguous()
         relax_inside_sphere = (points_norm < 1.2).float().detach()
         # Eikonal loss
         gradient_error = (torch.linalg.norm(gradients, ord=2,dim=-1) - 1.0) ** 2
-        Ek_loss = (relax_inside_sphere * gradient_error).sum() / (relax_inside_sphere.sum() + 1e-5)    
+        Ek_loss = (relax_inside_sphere * gradient_error).sum() / (relax_inside_sphere.sum() + 1e-5)  
+        # import pdb; pdb.set_trace()  
         return {
             'sdf_loss': sdf_loss,
             "Ek_loss": Ek_loss
@@ -540,12 +547,13 @@ class HonkaiStart(torch.nn.Module):
         iter_i = 0
         while iter_i < res_step:
             with torch.no_grad():
-                if iter_i % 2 == 0: # swtich the teacher neus for each step
+                if iter_i % 2 > -1: # swtich the teacher neus for each step
                     # Using source NeuS as teacher
                     image_index = (iter_i // 2) % source_images_total 
                     samples_source, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
                     transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
-                    samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
+                    # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
+                    samples_source__ = (transform_matrix[None, :3, :3] @ samples_source[:, :, None]).squeeze(dim=-1)
                     T1_expand = (transform_matrix[0:3, 3]).repeat(len(samples_source), 1)
                     samples = samples_source__ + T1_expand # notice its important to apply transformation to samples so that we can align those points to target axis
                 else:
@@ -557,9 +565,9 @@ class HonkaiStart(torch.nn.Module):
             for samples_batch, sdfs_batch in zip(samples.split(self.sdf_batch_size), sdfs.split(self.sdf_batch_size)):
                 res_out = self.distill_sdf_forward(sample_points=samples_batch, teacher_sdfs=sdfs_batch)
                 # import pdb; pdb.set_trace()
-                ek_loss = res_out['Ek_loss'] / len(samples_batch) * 10
-                sdf_loss = res_out['sdf_loss'] / len(samples_batch) * 10  # unify 
-                loss = ek_loss * self.igr_weight + sdf_loss 
+                ek_loss = res_out['Ek_loss'] / len(samples_batch)
+                sdf_loss = res_out['sdf_loss'] / len(samples_batch)  
+                loss = ek_loss * self.igr_weight + sdf_loss * 100 # bigger 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
@@ -567,27 +575,33 @@ class HonkaiStart(torch.nn.Module):
                 iter_i += 1
                 process_bar.update(1)
                 if self.iter_step % self.report_freq == 0:
-                    print('iter:{:8>d} loss = {} sdf_loss = {} ek_Loss = {} lr={}'.format(self.iter_step, loss, sdf_loss, ek_loss, self.optimizer.param_groups[0]['lr']))
-
+                    print('iter:{:8>d} weighted loss = {} sdf_loss = {} ek_Loss = {} lr={}'.format(self.iter_step, loss, sdf_loss, ek_loss, self.optimizer.param_groups[0]['lr']))
+                    #also save sample points as debug
+                    # point_cloud, store_path = o3d.geometry.PointCloud(), "./debug/test_samples" + str(iter_i) + ".ply"
+                    # point_cloud.points = o3d.utility.Vector3dVector(samples.clone().detach().cpu().numpy())
+                    # o3d.io.write_point_cloud(store_path, point_cloud)
                 if self.iter_step % self.save_freq == 0:
                     self.save_checkpoint()
                     #also save sample points as debug
                     point_cloud, store_path = o3d.geometry.PointCloud(), "./debug/test_samples" + str(iter_i) + ".ply"
                     point_cloud.points = o3d.utility.Vector3dVector(samples.clone().detach().cpu().numpy())
                     o3d.io.write_point_cloud(store_path, point_cloud)
-                if self.iter_step % self.save_freq == 0:
+                if self.iter_step % self.validate_freq == 0:
                     self.validate_student_mesh()
                 self.update_learning_rate()
         process_bar.close()
     
-    def validate_student_mesh(self, world_space=False, resolution=256, threshold=0.0, is_continue=False, bound_min=None, bound_max=None):
+    def validate_student_mesh(self, world_space=False, resolution=128, threshold=0.0, is_continue=False, bound_min=None, bound_max=None):
         if bound_min is None: 
             bound_min = torch.tensor([-0.1,-0.1,-0.1], dtype=torch.float32)
-            bound_max = torch.tensor([0.1,0.1,0.1], dtype=torch.float32)
+            bound_max = torch.tensor([0.1,  0.1, 0.1], dtype=torch.float32)
         if is_continue:
             # load ckpt in training:
-            ss = 1
-
+            ckpt_name = self.find_latest_ckpt_name()
+            if ckpt_name is not None:
+                self.load_checkpoint(ckpt_name)
+            else:
+                print_error("no ckpt is found")  
         vertices, triangles = \
             extract_geometry(bound_min,
                                   bound_max, 
@@ -670,6 +684,8 @@ if __name__ == '__main__':
     parser.add_argument('--vis_folder', type=str, default="debug/dragon2_FRNN")
     parser.add_argument('--write_out', type=str, default=0)
     parser.add_argument('--mode', type=str, default='refine_rt')
+    parser.add_argument('--is_continue', default=False, action="store_true")
+    
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu)
     honkaiStart = HonkaiStart(args.conf)
@@ -678,9 +694,9 @@ if __name__ == '__main__':
     elif args.mode == "render_ply":
         honkaiStart.render_colored_single_ply(neus_index=1, vis_folder=Path(args.vis_folder))
     elif args.mode == "distill":
-        honkaiStart.train_student_sdf()
+        honkaiStart.train_student_sdf(is_continue = args.is_continue)
     elif args.mode == "validate":
-        honkaiStart.train_student_sdf()
+        honkaiStart.validate_student_mesh(is_continue = args.is_continue)
     seed = 20031012
     
 
@@ -689,6 +705,7 @@ python reg_FRNN.py --conf ./confs/json/fuxuan.json --write_out fast --gpu 2
 python reg_FRNN.py --conf ./confs/json/klee.json --write_out fast --gpu 3
 python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --write_out fast --gpu 0
 python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode render_ply --write_out fast --gpu 1
-python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode distill --gpu 1
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode distill --gpu 1  --is_continue
+python reg_FRNN.py --conf ./confs/json/fuxuan_fricp.json --mode validate --gpu 1 --is_continue
 """
     
