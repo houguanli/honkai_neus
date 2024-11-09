@@ -4,20 +4,17 @@ import numpy as np
 import cv2 as cv
 import torch
 import torch.nn.functional as F
-from icecream import ic
 import tqdm
 from models.common import *
 from argparse import ArgumentParser
 from exp_runner import Runner
-import time
 import trimesh
 import open3d as o3d
 from pathlib import Path
 import os
-import torch.nn as nn
 from frnn_helper import FRNN
 from models.fields import * 
-from models.renderer import extract_fields, extract_geometry
+from models.renderer import extract_geometry, sample_pdf
 # target index does not move 
 # all raw RT and fine RT should be applied to source index
 # follow the logic with the robust icp
@@ -122,7 +119,7 @@ class HonkaiStart(torch.nn.Module):
         self.target_index = reg_data['target_index']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True)
-        self.objects, self.obj_masks, self.obj_names, self.aabb_trees, self.zero_sdf_points_all, self.zero_sdf_points_all_mask = [], [], [], [], [], [] # all arrays have the number of objects 
+        self.objects, self.obj_masks, self.obj_names, self.frnns, self.zero_sdf_points_all, self.zero_sdf_points_all_mask = [], [], [], [], [], [] # all arrays have the number of objects 
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
@@ -130,20 +127,33 @@ class HonkaiStart(torch.nn.Module):
             current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_point_mask_name = reg_data['obj_confs'][current_name + "_npz_mask"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
-            current_aabb_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
-            current_zero_sdf_points_mask_N3 = current_aabb_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
-            current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_aabb_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
+            current_frnn_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
+            current_zero_sdf_points_mask_N3 = current_frnn_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
+            current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_frnn_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
-            self.aabb_trees.append(current_aabb_tree)
+            self.frnns.append(current_frnn_tree)
             self.zero_sdf_points_all.append(current_zero_sdf_points)
             self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
 
+        #align_frnn
+        transformed_source_points, mask4zero_sdf_points = None, self.zero_sdf_points_all_mask[self.source_index]
+        transformed_source_points = torch.cat(self.zero_sdf_points_all[self.source_index], dim=0).reshape([-1, 3]) # to [M, 3]
+        transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+        # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
+        transformed_source_points = (transform_matrix[None, :3, :3] @ transformed_source_points[:, :, None]).squeeze(dim=-1)
+        T1_expand = (transform_matrix[0:3, 3]).repeat(len(transformed_source_points), 1)        
+        transformed_source_points = transformed_source_points + T1_expand
+        transformed_source_points = transformed_source_points.detach().cpu().numpy() # to numpy in np
+        self.aligned_frnn_source = FRNN.get_frnn_tree_with_PDP(np_points=transformed_source_points, 
+                                                               point_mask_path=None) # this is masked so no need for point masks
+        # import pdb; pdb.set_trace()
+        
         # Dstill
         # create descendant network      
         params_to_train = []
@@ -152,11 +162,11 @@ class HonkaiStart(torch.nn.Module):
         self.is_continue = is_continue
         
         self.iter_step = 0
-        self.end_iter = 500000
+        self.end_iter = 400000
         self.sdf_batch_size = reg_data['sdf_batch_size']
         self.report_freq = 500
         self.validate_freq = 5000
-        self.save_freq = 50000
+        self.save_freq = 10000
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
@@ -248,7 +258,7 @@ class HonkaiStart(torch.nn.Module):
         # print_info("running with ", images_total, "in total")
         global_loss, visited = 0, False
         neus_standard, neus_to_aligin = self.objects[source_index], self.objects[target_index]
-        aabb_standard, aabb_to_aligin = self.aabb_trees[source_index], self.aabb_trees[target_index]
+        aabb_standard, aabb_to_aligin = self.frnns[source_index], self.frnns[target_index]
         debug_rgb = []
         for image_index in range(start_index, start_index + images_total):
             rays_o, rays_d, rays_gt = self.generate_samples(source_index=source_index, image_index=image_index)
@@ -443,18 +453,11 @@ class HonkaiStart(torch.nn.Module):
             o3d.io.write_point_cloud(vis_path, point_cloud, write_ascii=True)
         return points_all, colors_all
 
-    # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
     def generate_sample_sdfs_from_teacher_model(self, neus_index : int, sample_nums=512, genarate_option="mix", image_index=-1):
         samples, sdfs, samples3d = None, None, None
         teacher_neus = self.objects[neus_index] # this is a packed runner
-        if genarate_option == "random": # random from the bbox
-            samples = None
-            sdfs = teacher_neus.sdf_network.sdf(samples).contiguous()
-        elif genarate_option == "zero": # select from 0-surface
-            samples = None
-            sdfs = torch.zeros(sample_nums)
-        elif genarate_option == "mix": # mix sample, assmuing image index is legeal
+        if genarate_option == "mix": # mix sample, assmuing image index is legeal
             rays_o, rays_d, rays_gt = self.generate_samples(source_index=neus_index, image_index=image_index)
             rays_mask = self.obj_masks[neus_index][image_index] # reshape is used for after mask, it become [rays_sum*3]
             rays_o, rays_d, rays_gt = rays_o[rays_mask].reshape(-1, 3), rays_d[rays_mask].reshape(-1, 3), rays_gt[rays_mask].reshape(-1, 3)
@@ -474,15 +477,111 @@ class HonkaiStart(torch.nn.Module):
             rays_o = rays_o.repeat_interleave(samples_per_ray, dim=0)
             rays_d = rays_d.repeat_interleave(samples_per_ray, dim=0)
             samples3d = rays_o + rays_d * samples
-            # for i in range(samples_total):
-            #     for j in range(samples_per_ray):
-            #         samples[i * samples_per_ray + j, :] = torch.clamp(samples[i * samples_per_ray + j, :], max=light_walk_distance[i])
-            #         samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
-            #         # import pdb; pdb.set_trace()
-            sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
-            # import pdb; pdb.set_trace()
-            # print("sampled with ", samples3d.shape, " points")
+        elif genarate_option == 'sphere':
+            # generate points in a sphere
+            samples3d = torch.randn(2**16, 3)
+            samples3d = samples3d / torch.norm(samples3d, dim=1, keepdim=True) * 0.5  # Normalize to sphere surface
+            # Scale to within a sphere with radius 0.1
+            samples3d = samples3d * torch.rand(2**16, 1) * 0.35
+        elif genarate_option == 'neus':
+            sample_sphere_raidus = 0.55
+            data = self.objects[neus_index].dataset.gen_random_rays_at(image_index, self.batch_size)
+            rays_o, rays_d, _, _ = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            near, far = self.objects[neus_index].dataset.near_far_from_sphere(rays_o, rays_d, radius=sample_sphere_raidus)
+            sample_dist = 2.0 / 64  # Assuming the region of interest is a unit sphere
+            z_vals = torch.linspace(0.0, 1.0, 64)
+            z_vals = near + (far - near) * z_vals[None, :]
+            t_rand = (torch.rand([self.batch_size, 1]) - 0.5)
+            z_vals = z_vals + t_rand * 2.0 / 64
+            pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
+            sdf = self.student_sdf_network.sdf(pts.reshape(-1, 3)).reshape(self.batch_size, 64)
+            for i in range(4):
+                new_z_vals = self.up_sample(rays_o,
+                                            rays_d,
+                                            z_vals,
+                                            sdf,
+                                            64 // 4,
+                                            64 * 2 ** i)
+                z_vals, sdf = self.cat_z_vals(rays_o,
+                                            rays_d,
+                                            z_vals,
+                                            new_z_vals,
+                                            sdf,
+                                            last=(i + 1 == 4))
+            # Section length
+            dists = z_vals[..., 1:] - z_vals[..., :-1]
+            dists = torch.cat([dists, torch.Tensor([sample_dist]).expand(dists[..., :1].shape)], -1)
+            mid_z_vals = z_vals + dists * 0.5
+            # Section midpoints
+            samples3d = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # n_rays, n_samples, 3
+            samples3d = samples3d.reshape(-1, 3)
+        dist, _, _ = self.frnns[self.target_index].query_Knear_points(samples3d, 30)
+        average_target_dist = torch.mean(dist, dim=-1)
+        dist, _, _ = self.aligned_frnn_source.query_Knear_points(samples3d, 30)
+        average_source_dist = torch.mean(dist, dim=-1)        
+        source_samples = samples3d[average_source_dist <  average_target_dist]
+        target_samples = samples3d[average_source_dist >= average_target_dist] # target 
+        
+        if neus_index == self.target_index or genarate_option == 'sphere':
+            _, transform_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+            sample3d_to_source = (transform_inv[None, :3, :3] @ source_samples[:, :, None]).squeeze(dim=-1)
+            sample3d_to_source = sample3d_to_source - self.raw_translation[None, :]
+            # using open3d output the sample3d_to_source
+            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_apply_inv" + ".ply"
+            point_cloud.points = o3d.utility.Vector3dVector(sample3d_to_source.clone().detach().cpu().numpy())
+            o3d.io.write_point_cloud(store_path, point_cloud)
+            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + ".ply"
+            point_cloud.points = o3d.utility.Vector3dVector(source_samples.clone().detach().cpu().numpy())
+            o3d.io.write_point_cloud(store_path, point_cloud)
+
+        source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
+        target_sdfs = self.objects[self.target_index].sdf_network.sdf(target_samples).contiguous()
+        samples3d = torch.cat([source_samples, target_samples], dim=0)
+        sdfs      = torch.cat([source_sdfs, target_sdfs], dim=0)
         return samples3d, sdfs
+
+    def up_sample(self, rays_o, rays_d, z_vals, sdf, n_importance, inv_s):
+        """
+        Up sampling give a fixed inv_s
+        """
+        batch_size, n_samples = z_vals.shape
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
+        radius = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=False)
+        inside_sphere = (radius[:, :-1] < 1.0) | (radius[:, 1:] < 1.0)
+        sdf = sdf.reshape(batch_size, n_samples)
+        prev_sdf, next_sdf = sdf[:, :-1], sdf[:, 1:]
+        prev_z_vals, next_z_vals = z_vals[:, :-1], z_vals[:, 1:]
+        mid_sdf = (prev_sdf + next_sdf) * 0.5
+        cos_val = (next_sdf - prev_sdf) / (next_z_vals - prev_z_vals + 1e-5)
+        prev_cos_val = torch.cat([torch.zeros([batch_size, 1]), cos_val[:, :-1]], dim=-1)
+        cos_val = torch.stack([prev_cos_val, cos_val], dim=-1)
+        cos_val, _ = torch.min(cos_val, dim=-1, keepdim=False)
+        cos_val = cos_val.clip(-1e3, 0.0) * inside_sphere
+        dist = (next_z_vals - prev_z_vals)
+        prev_esti_sdf = mid_sdf - cos_val * dist * 0.5
+        next_esti_sdf = mid_sdf + cos_val * dist * 0.5
+        prev_cdf = torch.sigmoid(prev_esti_sdf * inv_s)
+        next_cdf = torch.sigmoid(next_esti_sdf * inv_s)
+        alpha = (prev_cdf - next_cdf + 1e-5) / (prev_cdf + 1e-5)
+        weights = alpha * torch.cumprod(
+            torch.cat([torch.ones([batch_size, 1]), 1. - alpha + 1e-7], -1), -1)[:, :-1]
+
+        z_samples = sample_pdf(z_vals, weights, n_importance, det=True).detach()
+        return z_samples
+    
+    def cat_z_vals(self, rays_o, rays_d, z_vals, new_z_vals, sdf, last=False):
+        batch_size, n_samples = z_vals.shape
+        _, n_importance = new_z_vals.shape
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
+        z_vals = torch.cat([z_vals, new_z_vals], dim=-1)
+        z_vals, index = torch.sort(z_vals, dim=-1)
+        if not last:
+            new_sdf = self.student_sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, n_importance)
+            sdf = torch.cat([sdf, new_sdf], dim=-1)
+            xx = torch.arange(batch_size)[:, None].expand(batch_size, n_samples + n_importance).reshape(-1)
+            index = index.reshape(-1)
+            sdf = sdf[(xx, index)].reshape(batch_size, n_samples + n_importance)
+        return z_vals, sdf
 
     def query_student_sdfs(self, pts: torch.Tensor):
         sdf = self.student_sdf_network.sdf(pts).contiguous()
@@ -491,8 +590,9 @@ class HonkaiStart(torch.nn.Module):
     
     # the trained 
     def distill_sdf_forward(self, sample_points, teacher_sdfs): # calc sdf loss and EK loss for the network where needs with no grad? 
-        student_sdfs_source, student_sdfs_gradiant = self.query_student_sdfs(sample_points)
-        student_sdfs_source_error = student_sdfs_source - teacher_sdfs
+        sdf_nn_output = self.student_sdf_network(sample_points)
+        sdf = sdf_nn_output[:, :1]
+        student_sdfs_source_error = sdf - teacher_sdfs
         sdf_loss = F.l1_loss(student_sdfs_source_error, torch.zeros_like(student_sdfs_source_error),reduction='sum')  # calc sdf loss in neus_source
         # calc ek_loss borrow from neus trainner & render
         points_norm = torch.linalg.norm(sample_points, ord=2, dim=-1, keepdim=True)
@@ -545,34 +645,38 @@ class HonkaiStart(torch.nn.Module):
         process_bar = tqdm.tqdm(total=res_step)
 
         iter_i = 0
-        while iter_i < res_step:
+        while self.iter_step < self.end_iter:
             with torch.no_grad():
-                if iter_i % 2 > -1: # swtich the teacher neus for each step
+                if iter_i % 2 == 0: # swtich the teacher neus for each step
                     # Using source NeuS as teacher
-                    image_index = (iter_i // 2) % source_images_total 
-                    samples_source, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index)
-                    transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
-                    # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
-                    samples_source__ = (transform_matrix[None, :3, :3] @ samples_source[:, :, None]).squeeze(dim=-1)
-                    T1_expand = (transform_matrix[0:3, 3]).repeat(len(samples_source), 1)
-                    samples = samples_source__ + T1_expand # notice its important to apply transformation to samples so that we can align those points to target axis
+                    image_perm = torch.randperm(source_images_total)
+                    image_index = image_perm[(self.iter_step // 2) % len(image_perm)]
+                    samples, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.source_index, image_index=image_index, genarate_option='sphere')
+                    # transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+                    # # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
+                    # samples = (transform_matrix[None, :3, :3] @ samples[:, :, None]).squeeze(dim=-1)
+                    # T1_expand = (transform_matrix[0:3, 3]).repeat(len(samples), 1)
+                    # samples = samples + T1_expand # notice its important to apply transformation to samples so that we can align those points to target axis
                 else:
                     # Using target Neus as teacher
-                    image_index = (iter_i // 2) % target_images_total 
-                    samples, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index)
-            print_info("sampling with points ", len(samples))
+                    image_perm = torch.randperm(target_images_total)
+                    image_index = image_perm[(self.iter_step // 2) % len(image_perm)]
+                    samples, sdfs = self.generate_sample_sdfs_from_teacher_model(neus_index=self.target_index, image_index=image_index, genarate_option='sphere')
+            # print_info("sampling with points ", len(samples))
             # batching this process
             for samples_batch, sdfs_batch in zip(samples.split(self.sdf_batch_size), sdfs.split(self.sdf_batch_size)):
                 res_out = self.distill_sdf_forward(sample_points=samples_batch, teacher_sdfs=sdfs_batch)
                 # import pdb; pdb.set_trace()
                 ek_loss = res_out['Ek_loss'] / len(samples_batch)
                 sdf_loss = res_out['sdf_loss'] / len(samples_batch)  
-                loss = ek_loss * self.igr_weight + sdf_loss * 100 # bigger 
+                sdf_weight = 1000
+                if self.iter_step < 20000:
+                    sdf_weight = 1000
+                loss = ek_loss * self.igr_weight + sdf_loss * sdf_weight # bigger 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 self.iter_step += 1
-                iter_i += 1
                 process_bar.update(1)
                 if self.iter_step % self.report_freq == 0:
                     print('iter:{:8>d} weighted loss = {} sdf_loss = {} ek_Loss = {} lr={}'.format(self.iter_step, loss, sdf_loss, ek_loss, self.optimizer.param_groups[0]['lr']))
@@ -583,12 +687,13 @@ class HonkaiStart(torch.nn.Module):
                 if self.iter_step % self.save_freq == 0:
                     self.save_checkpoint()
                     #also save sample points as debug
-                    point_cloud, store_path = o3d.geometry.PointCloud(), "./debug/test_samples" + str(iter_i) + ".ply"
+                    point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples" + str(iter_i) + ".ply"
                     point_cloud.points = o3d.utility.Vector3dVector(samples.clone().detach().cpu().numpy())
                     o3d.io.write_point_cloud(store_path, point_cloud)
                 if self.iter_step % self.validate_freq == 0:
                     self.validate_student_mesh()
                 self.update_learning_rate()
+            iter_i += 1
         process_bar.close()
     
     def validate_student_mesh(self, world_space=False, resolution=128, threshold=0.0, is_continue=False, bound_min=None, bound_max=None):
@@ -696,7 +801,7 @@ if __name__ == '__main__':
     elif args.mode == "distill":
         honkaiStart.train_student_sdf(is_continue = args.is_continue)
     elif args.mode == "validate":
-        honkaiStart.validate_student_mesh(is_continue = args.is_continue)
+        honkaiStart.validate_student_mesh(is_continue = args.is_continue, resolution=512)
     seed = 20031012
     
 

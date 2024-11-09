@@ -217,12 +217,12 @@ class Dataset:
 
         return self.gen_rays_at_pose_mat(after_tran, resolution_level)
 
-    def near_far_from_sphere(self, rays_o, rays_d):
+    def near_far_from_sphere(self, rays_o, rays_d, radius=1):
         a = torch.sum(rays_d**2, dim=-1, keepdim=True)
         b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
         mid = 0.5 * (-b) / a
-        near = mid - 1.0
-        far = mid + 1.0
+        near = mid - radius
+        far = mid + radius
         return near, far
 
     def image_at(self, idx, resolution_level):

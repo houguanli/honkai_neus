@@ -13,10 +13,14 @@ init_query_point_num = 514
 
 class FRNN:
 
-    def __init__(self, npz_file_path, point_mask_path=None):
+    def __init__(self, npz_file_path=None, point_mask_path=None, np_points=None):
         # run a random query to generate grid
-        data = o3d.io.read_point_cloud(npz_file_path)
-        self.points = np.asarray(data.points, dtype=np.float32)
+        if npz_file_path is not None: 
+            data = o3d.io.read_point_cloud(npz_file_path)
+            self.points = np.asarray(data.points, dtype=np.float32)
+        elif np_points is not None:
+            self.points = np_points
+
         self.unmasked_points = self.points # store the unmasked_points if it will be used
         self.frnn_grid, self.mask = None, None
         if point_mask_path is not None:
@@ -53,7 +57,7 @@ class FRNN:
         dists, idxs, nn, _ = frnn.frnn_grid_points(
         query_points, self.source_points, None, None, points_num, max_length,\
             grid=self.grid, return_nn=False, return_sorted=True)
-        return dists, idxs, nn
+        return dists[0], idxs, nn
     
     def query_nearest_points(self, query_points):# torch, N, 3, only return the nearest
         dists, idxs, _ = self.query_Knear_points(query_points, 1) # K = 1
@@ -68,7 +72,10 @@ class FRNN:
         return ava_flag
     
     def get_frnn_tree(npz_path, point_mask_path=None):
-        return FRNN(npz_path,point_mask_path=point_mask_path)  
+        return FRNN(npz_path,point_mask_path=point_mask_path) 
+
+    def get_frnn_tree_with_PDP(point_mask_path, np_points): # with pre defined points
+        return FRNN(npz_file_path=None,point_mask_path=point_mask_path, np_points=np_points) 
         
 """
 # dists: distance
