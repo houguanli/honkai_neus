@@ -445,7 +445,7 @@ class HonkaiStart(torch.nn.Module):
 
     # TODO: those functions need to be complete and test in the future
     # genearte query points from teacher model and returns sdf points
-    def generate_sample_sdfs_from_teacher_model(self, neus_index : int, sample_nums=512, genarate_option="mix", image_index=-1):
+    def generate_sample_sdfs_from_teacher_model(self, neus_index : int, sample_nums=8192, genarate_option="mix", image_index=-1):
         samples, sdfs, samples3d = None, None, None
         teacher_neus = self.objects[neus_index] # this is a packed runner
         if genarate_option == "random": # random from the bbox
@@ -480,6 +480,12 @@ class HonkaiStart(torch.nn.Module):
             #         samples3d[i * samples_per_ray + j, :] = rays_o[i] + rays_d[i] * samples[i * samples_per_ray + j, :]
             #         # import pdb; pdb.set_trace()
             sdfs = teacher_neus.sdf_network.sdf(samples3d).contiguous()
+            # random mask samples 
+            random_mask = torch.zeros(len(samples3d), dtype=torch.int)
+            indices = torch.randperm(len(samples3d))[:sample_nums]
+            random_mask[indices] = 1
+            samples3d = samples3d[random_mask].reshape(-1, 3)
+            sdfs =  sdfs[random_mask].reshape(-1)
             # import pdb; pdb.set_trace()
             # print("sampled with ", samples3d.shape, " points")
         return samples3d, sdfs
