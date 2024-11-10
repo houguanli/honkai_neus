@@ -112,13 +112,16 @@ class HonkaiStart(torch.nn.Module):
         self.device = 'cuda'
         with open(setting_json_path, "r") as json_file:
             reg_data = json.load(json_file)
+
         self.objects_cnt = reg_data['objects_cnt']
         self.train_iters = reg_data['train_iters']
         self.batch_size = reg_data['batch_size']
         self.source_index = reg_data['source_index']
         self.target_index = reg_data['target_index']
+        self.sdf_batch_size = reg_data['sdf_batch_size']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True)
+
         self.objects, self.obj_masks, self.obj_names, self.frnns, self.zero_sdf_points_all, self.zero_sdf_points_all_mask = [], [], [], [], [], [] # all arrays have the number of objects 
         for index in range (0, self.objects_cnt):
             current_name = str(index)
@@ -145,10 +148,11 @@ class HonkaiStart(torch.nn.Module):
         transformed_source_points, mask4zero_sdf_points = None, self.zero_sdf_points_all_mask[self.source_index]
         transformed_source_points = torch.cat(self.zero_sdf_points_all[self.source_index], dim=0).reshape([-1, 3]) # to [M, 3]
         transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
-        # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
         transformed_source_points = (transform_matrix[None, :3, :3] @ transformed_source_points[:, :, None]).squeeze(dim=-1)
         T1_expand = (transform_matrix[0:3, 3]).repeat(len(transformed_source_points), 1)        
         transformed_source_points = transformed_source_points + T1_expand
+        self.aligned_source_points = transformed_source_points # on cuda 
+        self.aligned_target_points = self.frnns[self.target_index].points # on cuda 
         transformed_source_points = transformed_source_points.detach().cpu().numpy() # to numpy in np
         self.aligned_frnn_source = FRNN.get_frnn_tree_with_PDP(np_points=transformed_source_points, 
                                                                point_mask_path=None) # this is masked so no need for point masks
@@ -163,7 +167,6 @@ class HonkaiStart(torch.nn.Module):
         
         self.iter_step = 0
         self.end_iter = 400000
-        self.sdf_batch_size = reg_data['sdf_batch_size']
         self.report_freq = 500
         self.validate_freq = 5000
         self.save_freq = 10000
@@ -515,6 +518,26 @@ class HonkaiStart(torch.nn.Module):
             # Section midpoints
             samples3d = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # n_rays, n_samples, 3
             samples3d = samples3d.reshape(-1, 3)
+        elif genarate_option == "zero": # generate zero sdfs from the incoming points:
+            if neus_index == self.source_index: # need to transform the sample points to target axis
+                len_mask = len(self.aligned_source_points)
+                samples_from = self.aligned_source_points
+            else:
+                len_mask = len(self.aligned_target_points)
+                samples_from = self.aligned_target_points
+            sample_mask = torch.zeros(len_mask, dtype=torch.int)
+            indics = torch.randperm(len())[:sample_nums] # random pick up
+            sample_mask[indics] = 1
+            samples3d = samples_from[sample_mask].reashape(-1, 3)
+            sdfs = torch.zeros(len(sample_nums))
+
+            # using open3d output the sample3d_to_source
+            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + str(neus_index) + ".ply"
+            point_cloud.points = o3d.utility.Vector3dVector(samples3d.clone().detach().cpu().numpy())
+            o3d.io.write_point_cloud(store_path, point_cloud)
+
+            return samples3d, sdfs
+
         dist, _, _ = self.frnns[self.target_index].query_Knear_points(samples3d, 30)
         average_target_dist = torch.mean(dist, dim=-1)
         dist, _, _ = self.aligned_frnn_source.query_Knear_points(samples3d, 30)
