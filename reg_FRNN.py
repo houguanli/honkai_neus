@@ -525,15 +525,15 @@ class HonkaiStart(torch.nn.Module):
         if neus_index == self.target_index or genarate_option == 'sphere':
             _, transform_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
             sample3d_to_source = (transform_inv[None, :3, :3] @ source_samples[:, :, None]).squeeze(dim=-1)
-            sample3d_to_source = sample3d_to_source - self.raw_translation[None, :]
+            T1_expand = (transform_inv[0:3, 3]).repeat(len(sample3d_to_source), 1)
+            sample3d_to_source = sample3d_to_source + T1_expand
             # using open3d output the sample3d_to_source
-            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_apply_inv" + ".ply"
-            point_cloud.points = o3d.utility.Vector3dVector(sample3d_to_source.clone().detach().cpu().numpy())
-            o3d.io.write_point_cloud(store_path, point_cloud)
-            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + ".ply"
-            point_cloud.points = o3d.utility.Vector3dVector(source_samples.clone().detach().cpu().numpy())
-            o3d.io.write_point_cloud(store_path, point_cloud)
-
+            # point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_apply_inv" + ".ply"
+            # point_cloud.points = o3d.utility.Vector3dVector(sample3d_to_source.clone().detach().cpu().numpy())
+            # o3d.io.write_point_cloud(store_path, point_cloud)
+            # point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + ".ply"
+            # point_cloud.points = o3d.utility.Vector3dVector(source_samples.clone().detach().cpu().numpy())
+            # o3d.io.write_point_cloud(store_path, point_cloud)
         source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
         target_sdfs = self.objects[self.target_index].sdf_network.sdf(target_samples).contiguous()
         samples3d = torch.cat([source_samples, target_samples], dim=0)
