@@ -4,6 +4,7 @@
     "objects_cnt": 2,
     "batch_size": 1024,
     "sdf_batch_size":8192,
+    "network_conf": "./confs/thin_structure.conf",
     "obj_confs": {
         "0_conf": "./confs/thin_structure_white_bkgd.conf",
         "0_name": "dragon_pos1",

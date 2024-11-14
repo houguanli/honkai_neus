@@ -112,13 +112,16 @@ class HonkaiStart(torch.nn.Module):
         self.device = 'cuda'
         with open(setting_json_path, "r") as json_file:
             reg_data = json.load(json_file)
+
         self.objects_cnt = reg_data['objects_cnt']
         self.train_iters = reg_data['train_iters']
         self.batch_size = reg_data['batch_size']
         self.source_index = reg_data['source_index']
         self.target_index = reg_data['target_index']
+        self.sdf_batch_size = reg_data['sdf_batch_size']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True)
+
         self.objects, self.obj_masks, self.obj_names, self.frnns, self.zero_sdf_points_all, self.zero_sdf_points_all_mask = [], [], [], [], [], [] # all arrays have the number of objects 
         for index in range (0, self.objects_cnt):
             current_name = str(index)
@@ -127,31 +130,49 @@ class HonkaiStart(torch.nn.Module):
             current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_point_mask_name = reg_data['obj_confs'][current_name + "_npz_mask"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
-            current_frnn_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
-            current_zero_sdf_points_mask_N3 = current_frnn_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
-            current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_frnn_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
+            # current_frnn_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
+            # current_zero_sdf_points_mask_N3 = current_frnn_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
+            # current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_frnn_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
-            self.frnns.append(current_frnn_tree)
-            self.zero_sdf_points_all.append(current_zero_sdf_points)
-            self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
+            # self.frnns.append(current_frnn_tree)
+            # self.zero_sdf_points_all.append(current_zero_sdf_points)
+            # self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
 
         #align_frnn
-        transformed_source_points, mask4zero_sdf_points = None, self.zero_sdf_points_all_mask[self.source_index]
-        transformed_source_points = torch.cat(self.zero_sdf_points_all[self.source_index], dim=0).reshape([-1, 3]) # to [M, 3]
+        # transformed_source_points, mask4zero_sdf_points = None, self.zero_sdf_points_all_mask[self.source_index]
+        # transformed_source_points = torch.cat(self.zero_sdf_points_all[self.source_index], dim=0).reshape([-1, 3]) # to [M, 3]
+
+        self.target_frnn = FRNN(npz_file_path='./exp/dragon_pos1/dragon_pos1_full.ply', point_mask_path=None)
+        data = o3d.io.read_point_cloud('./exp/dragon_pos2/dragon_pos2_full.ply')
+        source_points = np.asarray(data.points, dtype=np.float32)
+        source_points = torch.from_numpy(source_points).to('cuda')
+
         transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
-        # samples_source__ = torch.matmul(transform_matrix[None, :3, :3], samples_source[:, :, None]).squeeze(dim=-1)
-        transformed_source_points = (transform_matrix[None, :3, :3] @ transformed_source_points[:, :, None]).squeeze(dim=-1)
-        T1_expand = (transform_matrix[0:3, 3]).repeat(len(transformed_source_points), 1)        
-        transformed_source_points = transformed_source_points + T1_expand
-        transformed_source_points = transformed_source_points.detach().cpu().numpy() # to numpy in np
-        self.aligned_frnn_source = FRNN.get_frnn_tree_with_PDP(np_points=transformed_source_points, 
-                                                               point_mask_path=None) # this is masked so no need for point masks
+        # transformed_source_points = (transform_matrix[None, :3, :3] @ transformed_source_points[:, :, None]).squeeze(dim=-1)
+        source_points = (transform_matrix[None, :3, :3] @ source_points[:, :, None]).squeeze(dim=-1)
+
+        # T1_expand = (transform_matrix[0:3, 3]).repeat(len(transformed_source_points), 1)        
+        T1_expand = (transform_matrix[0:3, 3]).repeat(len(source_points), 1)
+        # transformed_source_points = transformed_source_points + T1_expand
+        source_points = source_points + T1_expand
+        # self.aligned_source_points = transformed_source_points # on cuda 
+        # self.aligned_target_points = self.frnns[self.target_index].points # on cuda 
+        # transformed_source_points = transformed_source_points.detach().cpu().numpy() # to numpy in np
+        source_points_np = source_points.detach().cpu().numpy()
+        # self.aligned_frnn_source = FRNN.get_frnn_tree_with_PDP(np_points=transformed_source_points, 
+        #                                                        point_mask_path=None) # this is masked so no need for point masks
+        self.source_frnn = FRNN.get_frnn_tree_with_PDP(np_points=source_points_np, point_mask_path=None)
+        # write out the aligned source points
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(source_points_np)
+        o3d.io.write_point_cloud('./exp/dragon_pos2/dragon_pos2_aligned.ply', point_cloud)
+
         # import pdb; pdb.set_trace()
         
         # Dstill
@@ -163,14 +184,13 @@ class HonkaiStart(torch.nn.Module):
         
         self.iter_step = 0
         self.end_iter = 400000
-        self.sdf_batch_size = reg_data['sdf_batch_size']
         self.report_freq = 500
         self.validate_freq = 5000
         self.save_freq = 10000
         self.base_exp_dir = Path('exp') / 'distill' / case_name
         self.learning_rate_alpha = 0.05
         self.learning_rate = 5e-4
-        self.igr_weight = 0.01
+        self.igr_weight = 0.1
         
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
@@ -515,26 +535,50 @@ class HonkaiStart(torch.nn.Module):
             # Section midpoints
             samples3d = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # n_rays, n_samples, 3
             samples3d = samples3d.reshape(-1, 3)
-        dist, _, _ = self.frnns[self.target_index].query_Knear_points(samples3d, 30)
-        average_target_dist = torch.mean(dist, dim=-1)
-        dist, _, _ = self.aligned_frnn_source.query_Knear_points(samples3d, 30)
-        average_source_dist = torch.mean(dist, dim=-1)        
-        source_samples = samples3d[average_source_dist <  average_target_dist]
-        target_samples = samples3d[average_source_dist >= average_target_dist] # target 
+
+        # dist, _, _ = self.target_frnn.query_Knear_points(samples3d, 10)
+        # average_target_dist = torch.mean(dist, dim=-1)
+        # dist, _, _ = self.source_frnn.query_Knear_points(samples3d, 10)
+        # average_source_dist = torch.mean(dist, dim=-1)    
+
+        # source_samples = samples3d[average_source_dist < average_target_dist]
+        # target_samples = samples3d[average_source_dist >= average_target_dist]
+
+        # Compute SDF values for source and target
+        # SDF of target network
+        sdf_target = self.objects[self.target_index].sdf_network.sdf(samples3d).contiguous()
+        # SDF of source network
+        _, transform_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+        sample3d_to_source = (transform_inv[None, :3, :3] @ samples3d[:, :, None]).squeeze(dim=-1)
+        T1_expand = (transform_inv[0:3, 3]).repeat(len(sample3d_to_source), 1)
+        sample3d_to_source = sample3d_to_source + T1_expand
+        sdf_source = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
+
+        # Create boolean masks using bitwise operations (&, |)
+        mask1 = ((sdf_source > 0) & (sdf_target > 0) & (sdf_source >= sdf_target)).squeeze()
+        mask2 = ((sdf_source > 0) & (sdf_target <= 0)).squeeze()
+        mask3 = ((sdf_source < 0) & (sdf_target < 0) & (sdf_source >= sdf_target)).squeeze()
+        source_mask = mask1 | mask2 | mask3
+        # Apply masks to filter samples for `source_samples`
+        source_samples = samples3d[source_mask]
+
+        # Define masks for `target_samples`
+        mask1 = ((sdf_source > 0) & (sdf_target > 0) & (sdf_target > sdf_source)).squeeze()
+        mask2 = ((sdf_source <= 0) & (sdf_target > 0)).squeeze()
+        mask3 = ((sdf_source < 0) & (sdf_target < 0) & (sdf_target > sdf_source)).squeeze()
+        target_mask = mask1 | mask2 | mask3
+        # Apply masks to filter samples for `target_samples`
+        target_samples = samples3d[target_mask]
         
         if neus_index == self.target_index or genarate_option == 'sphere':
             _, transform_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
             sample3d_to_source = (transform_inv[None, :3, :3] @ source_samples[:, :, None]).squeeze(dim=-1)
-            sample3d_to_source = sample3d_to_source - self.raw_translation[None, :]
-            # using open3d output the sample3d_to_source
-            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_apply_inv" + ".ply"
-            point_cloud.points = o3d.utility.Vector3dVector(sample3d_to_source.clone().detach().cpu().numpy())
-            o3d.io.write_point_cloud(store_path, point_cloud)
-            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + ".ply"
-            point_cloud.points = o3d.utility.Vector3dVector(source_samples.clone().detach().cpu().numpy())
-            o3d.io.write_point_cloud(store_path, point_cloud)
-
-        source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
+            T1_expand = (transform_inv[0:3, 3]).repeat(len(sample3d_to_source), 1)
+            sample3d_to_source = sample3d_to_source + T1_expand
+            source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
+        else:
+            source_sdfs = self.objects[self.source_index].sdf_network.sdf(source_samples).contiguous()
+        
         target_sdfs = self.objects[self.target_index].sdf_network.sdf(target_samples).contiguous()
         samples3d = torch.cat([source_samples, target_samples], dim=0)
         sdfs      = torch.cat([source_sdfs, target_sdfs], dim=0)
@@ -669,9 +713,9 @@ class HonkaiStart(torch.nn.Module):
                 # import pdb; pdb.set_trace()
                 ek_loss = res_out['Ek_loss'] / len(samples_batch)
                 sdf_loss = res_out['sdf_loss'] / len(samples_batch)  
-                sdf_weight = 1000
+                sdf_weight = 100
                 if self.iter_step < 20000:
-                    sdf_weight = 1000
+                    sdf_weight = 100
                 loss = ek_loss * self.igr_weight + sdf_loss * sdf_weight # bigger 
                 self.optimizer.zero_grad()
                 loss.backward()

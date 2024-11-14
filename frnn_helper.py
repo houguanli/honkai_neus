@@ -26,7 +26,7 @@ class FRNN:
         if point_mask_path is not None:
             self.mask = np.loadtxt(point_mask_path, dtype=bool)
             # point_cloud = o3d.geometry.PointCloud() # auto write out
-            self.points = self.points[self.mask] # remove outlier
+            # self.points = self.points[self.mask] # remove outlier
             # store_path ="./debug/test_mask.ply"
             # point_cloud.points = o3d.utility.Vector3dVector(self.points)
             # o3d.io.write_point_cloud(store_path, point_cloud)

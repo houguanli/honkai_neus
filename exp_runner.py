@@ -123,7 +123,6 @@ class Runner:
             render_out = self.renderer.render(rays_o, rays_d, near, far,
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
-            print("samples ", len(rays_o))
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
