@@ -130,15 +130,22 @@ class HonkaiStart(torch.nn.Module):
             current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_point_mask_name = reg_data['obj_confs'][current_name + "_npz_mask"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
+<<<<<<< HEAD
             # current_frnn_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
             # current_zero_sdf_points_mask_N3 = current_frnn_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
             # current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_frnn_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
+=======
+            current_frnn_tree = FRNN.get_frnn_tree(current_npz_name, point_mask_path=current_point_mask_name)
+            current_zero_sdf_points_mask_N3 = current_frnn_tree.mask.unsqueeze(1).repeat(1, 3) # reshape 2 N*3
+            current_zero_sdf_points, mask4zero_sdf_points, _ = current_exp_runner.split_zero_sdf_points(current_frnn_tree.unmasked_points, current_zero_sdf_points_mask_N3) # on torch
+>>>>>>> d367ee09b9ce182c930228aa5975b6f7de2e0079
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
+<<<<<<< HEAD
             # self.frnns.append(current_frnn_tree)
             # self.zero_sdf_points_all.append(current_zero_sdf_points)
             # self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
@@ -173,6 +180,25 @@ class HonkaiStart(torch.nn.Module):
         point_cloud.points = o3d.utility.Vector3dVector(source_points_np)
         o3d.io.write_point_cloud('./exp/dragon_pos2/dragon_pos2_aligned.ply', point_cloud)
 
+=======
+            self.frnns.append(current_frnn_tree)
+            self.zero_sdf_points_all.append(current_zero_sdf_points)
+            self.zero_sdf_points_all_mask.append(mask4zero_sdf_points)
+        self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
+
+        #align_frnn
+        transformed_source_points, mask4zero_sdf_points = None, self.zero_sdf_points_all_mask[self.source_index]
+        transformed_source_points = torch.cat(self.zero_sdf_points_all[self.source_index], dim=0).reshape([-1, 3]) # to [M, 3]
+        transform_matrix, _ = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+        transformed_source_points = (transform_matrix[None, :3, :3] @ transformed_source_points[:, :, None]).squeeze(dim=-1)
+        T1_expand = (transform_matrix[0:3, 3]).repeat(len(transformed_source_points), 1)        
+        transformed_source_points = transformed_source_points + T1_expand
+        self.aligned_source_points = transformed_source_points # on cuda 
+        self.aligned_target_points = self.frnns[self.target_index].points # on cuda 
+        transformed_source_points = transformed_source_points.detach().cpu().numpy() # to numpy in np
+        self.aligned_frnn_source = FRNN.get_frnn_tree_with_PDP(np_points=transformed_source_points, 
+                                                               point_mask_path=None) # this is masked so no need for point masks
+>>>>>>> d367ee09b9ce182c930228aa5975b6f7de2e0079
         # import pdb; pdb.set_trace()
         
         # Dstill
@@ -535,6 +561,7 @@ class HonkaiStart(torch.nn.Module):
             # Section midpoints
             samples3d = rays_o[:, None, :] + rays_d[:, None, :] * mid_z_vals[..., :, None]  # n_rays, n_samples, 3
             samples3d = samples3d.reshape(-1, 3)
+<<<<<<< HEAD
 
         # dist, _, _ = self.target_frnn.query_Knear_points(samples3d, 10)
         # average_target_dist = torch.mean(dist, dim=-1)
@@ -569,16 +596,55 @@ class HonkaiStart(torch.nn.Module):
         target_mask = mask1 | mask2 | mask3
         # Apply masks to filter samples for `target_samples`
         target_samples = samples3d[target_mask]
+=======
+        elif genarate_option == "zero": # generate zero sdfs from the incoming points:
+            if neus_index == self.source_index: # need to transform the sample points to target axis
+                len_mask = len(self.aligned_source_points)
+                samples_from = self.aligned_source_points
+            else:
+                len_mask = len(self.aligned_target_points)
+                samples_from = self.aligned_target_points
+            sample_mask = torch.zeros(len_mask, dtype=torch.int)
+            indics = torch.randperm(len())[:sample_nums] # random pick up
+            sample_mask[indics] = 1
+            samples3d = samples_from[sample_mask].reashape(-1, 3)
+            sdfs = torch.zeros(len(sample_nums))
+
+            # using open3d output the sample3d_to_source
+            point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + str(neus_index) + ".ply"
+            point_cloud.points = o3d.utility.Vector3dVector(samples3d.clone().detach().cpu().numpy())
+            o3d.io.write_point_cloud(store_path, point_cloud)
+
+            return samples3d, sdfs
+
+        dist, _, _ = self.frnns[self.target_index].query_Knear_points(samples3d, 30)
+        average_target_dist = torch.mean(dist, dim=-1)
+        dist, _, _ = self.aligned_frnn_source.query_Knear_points(samples3d, 30)
+        average_source_dist = torch.mean(dist, dim=-1)        
+        source_samples = samples3d[average_source_dist <  average_target_dist]
+        target_samples = samples3d[average_source_dist >= average_target_dist] # target 
+>>>>>>> d367ee09b9ce182c930228aa5975b6f7de2e0079
         
         if neus_index == self.target_index or genarate_option == 'sphere':
             _, transform_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
             sample3d_to_source = (transform_inv[None, :3, :3] @ source_samples[:, :, None]).squeeze(dim=-1)
             T1_expand = (transform_inv[0:3, 3]).repeat(len(sample3d_to_source), 1)
             sample3d_to_source = sample3d_to_source + T1_expand
+<<<<<<< HEAD
             source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
         else:
             source_sdfs = self.objects[self.source_index].sdf_network.sdf(source_samples).contiguous()
         
+=======
+            # using open3d output the sample3d_to_source
+            # point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_apply_inv" + ".ply"
+            # point_cloud.points = o3d.utility.Vector3dVector(sample3d_to_source.clone().detach().cpu().numpy())
+            # o3d.io.write_point_cloud(store_path, point_cloud)
+            # point_cloud, store_path = o3d.geometry.PointCloud(), "./exp/distill/test_samples_" + ".ply"
+            # point_cloud.points = o3d.utility.Vector3dVector(source_samples.clone().detach().cpu().numpy())
+            # o3d.io.write_point_cloud(store_path, point_cloud)
+        source_sdfs = self.objects[self.source_index].sdf_network.sdf(sample3d_to_source).contiguous()
+>>>>>>> d367ee09b9ce182c930228aa5975b6f7de2e0079
         target_sdfs = self.objects[self.target_index].sdf_network.sdf(target_samples).contiguous()
         samples3d = torch.cat([source_samples, target_samples], dim=0)
         sdfs      = torch.cat([source_sdfs, target_sdfs], dim=0)
@@ -713,9 +779,15 @@ class HonkaiStart(torch.nn.Module):
                 # import pdb; pdb.set_trace()
                 ek_loss = res_out['Ek_loss'] / len(samples_batch)
                 sdf_loss = res_out['sdf_loss'] / len(samples_batch)  
+<<<<<<< HEAD
                 sdf_weight = 100
                 if self.iter_step < 20000:
                     sdf_weight = 100
+=======
+                sdf_weight = 1000
+                if self.iter_step < 20000:
+                    sdf_weight = 1000
+>>>>>>> d367ee09b9ce182c930228aa5975b6f7de2e0079
                 loss = ek_loss * self.igr_weight + sdf_loss * sdf_weight # bigger 
                 self.optimizer.zero_grad()
                 loss.backward()
