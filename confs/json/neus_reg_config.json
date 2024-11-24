@@ -1,0 +1,15 @@
+{
+    "neus_config": "./confs/thin_structure.conf",
+    "target_ckpt": "path/to/target_ckpt",
+    "target_case": "furina_target",
+    "source_ckpt": [
+        "path/to/source_neus1",
+        "path/to/source_neus2"
+    ],
+    "source_case": [
+        "furina_source1",
+        "furina_source2"
+    ],
+    
+    "new_case": "furina_new"
+}

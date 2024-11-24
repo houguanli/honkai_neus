@@ -30,6 +30,17 @@ class HonkaiStart(torch.nn.Module):
         self.sdf_batch_size = reg_data['sdf_batch_size']
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32)
+        transform_mat, transform_mat_inv = self.get_transform_matrix(self.raw_translation, self.raw_quaternion)
+        import trimesh
+        mesh1 = trimesh.load_mesh(f'./exp/dragon_pos2/womask_white/meshes/00300000.ply')
+        vertices1 = np.array(mesh1.vertices)
+        vertices1 = torch.tensor(vertices1, dtype=torch.float32)
+        vertices_transformed = (transform_mat[None, :3, :3] @ vertices1[:, :, None]).squeeze(dim=-1)
+        T1_expand = (transform_mat[0:3, 3]).repeat(len(vertices1), 1)
+        vertices_transformed = vertices_transformed + T1_expand
+        vertices1 = vertices_transformed.detach().cpu().numpy()
+        mesh1 = trimesh.Trimesh(vertices1, np.array(mesh1.faces))
+        mesh1.export(f'./exp/dragon_pos2/womask_white/meshes/00300000_transformed.ply', encoding='ascii')
 
         self.objects, self.obj_masks, self.obj_names, self.frnns, self.zero_sdf_points_all, self.zero_sdf_points_all_mask = [], [], [], [], [], [] # all arrays have the number of objects 
         for index in range (0, self.objects_cnt):
@@ -188,32 +199,25 @@ class HonkaiStart(torch.nn.Module):
 
         res_step = self.end_iter - self.iter_step
         iter_i = 0
-        for iter_i in tqdm.tqdm(range(res_step)):
-            if iter_i % 2 == 0: # swtich the teacher neus for each step
-                # Using source NeuS as teacher
-                image_perm = torch.randperm(self.source_images_total)
-                image_index = image_perm[(self.iter_step // 2) % len(image_perm)]
-                neus_index = self.source_index
-            else:
-                # Using target Neus as teacher
-                image_perm = torch.randperm(self.target_images_total)
-                image_index = image_perm[(self.iter_step // 2) % len(image_perm)]
-                neus_index = self.target_index
+        neus_index = self.source_index
+        transfrom_matrix, transfrom_matrix_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
 
-            sample_sphere_raidus = 0.55
+        for iter_i in tqdm.tqdm(range(res_step)):
+            # Using source NeuS as teacher
+            image_perm = torch.randperm(self.source_images_total)
+            image_index = image_perm[(self.iter_step // 2) % len(image_perm)]
+            
             data = self.objects[neus_index].dataset.gen_random_rays_at(image_index, self.batch_size)
             rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             # No matter which neus is the teacher, the sample points are always generated in the target neus space
             # Thus we transform the sample points to the target neus space if the teacher is the source neus
             if neus_index == self.source_index:
-                transfrom_matrix, transfrom_matrix_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
                 rays_o = (transfrom_matrix[None, :3, :3] @ rays_o[:, :, None]).squeeze(dim=-1)
                 rays_d = (transfrom_matrix[None, :3, :3] @ rays_d[:, :, None]).squeeze(dim=-1)
                 T1_expand = (transfrom_matrix[0:3, 3]).repeat(len(rays_o), 1)
                 rays_o = rays_o + T1_expand
                 rays_d = rays_d + T1_expand
-
-            near, far = self.objects[neus_index].dataset.near_far_from_sphere(rays_o, rays_d, radius=sample_sphere_raidus)
+            near, far = self.objects[neus_index].dataset.near_far_from_sphere(rays_o, rays_d)
 
             background_rgb = None
             if self.use_white_bkgd:
@@ -224,13 +228,11 @@ class HonkaiStart(torch.nn.Module):
             else:
                 mask = torch.ones_like(mask)
             mask_sum = mask.sum() + 1e-5
-            render_out = self.renderer.distill_render(rays_o, rays_d, near, far, 
-                                            transfrom_matrix_inv, self.objects[self.source_index], self.objects[self.target_index],
-                                            background_rgb=background_rgb,
-                                            cos_anneal_ratio=self.get_cos_anneal_ratio())
+            render_out = self.renderer.render(rays_o, rays_d, near, far,
+                                              background_rgb=background_rgb,
+                                              cos_anneal_ratio=self.get_cos_anneal_ratio())
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
-            # sdf_loss = render_out['sdf_loss']
             cdf_fine = render_out['cdf_fine']
             gradient_error = render_out['gradient_error']
             weight_max = render_out['weight_max']
@@ -245,9 +247,9 @@ class HonkaiStart(torch.nn.Module):
 
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
 
-            loss =  color_fine_loss + \
-                    eikonal_loss * self.igr_weight + \
-                    mask_loss * self.mask_weight
+            loss = color_fine_loss + \
+                   eikonal_loss * self.igr_weight + \
+                   mask_loss * self.mask_weight
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -289,7 +291,6 @@ class HonkaiStart(torch.nn.Module):
             T1_expand = (transfrom_matrix[0:3, 3]).repeat(len(rays_o), 1)
             rays_o = rays_o + T1_expand
             rays_d = rays_d + T1_expand
-
         out_rgb_fine = []
         out_normal_fine = []
         depth_map = []

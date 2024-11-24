@@ -303,10 +303,10 @@ if __name__ == '__main__':
     # mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon1.obj',  'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon2.obj'
     mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/front.obj', 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/back.obj'
 
-    sdf1, sdf2 = Mesh2SDF(mesh_path_stand), Mesh2SDF(mesh_path_rt60)
-    full_rect1, full_rect2 = sdf1.calculate_obb_from_point_cloud(), sdf2.calculate_obb_from_point_cloud()
+    target_sdf, source_sdf = Mesh2SDF(mesh_path_stand), Mesh2SDF(mesh_path_rt60)
+    full_rect1, full_rect2 = target_sdf.calculate_obb_from_point_cloud(), source_sdf.calculate_obb_from_point_cloud()
     rect1, rect2 = select_rect_from_full(full_rect1), select_rect_from_full(full_rect2) # simplify OBB as o x y z
-    raw_RT, _ = pairwise_obb(r1 = rect1, r2 = rect2, r1_SDF = sdf1, r2_SDF=sdf2)
+    raw_RT, _ = pairwise_obb(r1 = rect1, r2 = rect2, r1_SDF = target_sdf, r2_SDF=source_sdf)
     # raw_RT, _ = pairwise_obb_plus(r1 = rect1, r2 = rect2, r1_SDF = sdf1, r2_SDF=sdf2, acc_flag=False)
 
     # point_cloud = o3d.geometry.PointCloud()

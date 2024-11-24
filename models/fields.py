@@ -106,7 +106,6 @@ class SDFNetwork(nn.Module):
             only_inputs=True)[0]
         return gradients.unsqueeze(1)
 
-
 # This implementation is borrowed from IDR: https://github.com/lioryariv/idr
 class RenderingNetwork(nn.Module):
     def __init__(self,
@@ -269,12 +268,12 @@ def getDefaultSDF_Network():
         "d_out" : 257,
         "d_in" : 3,
         "d_hidden" : 256,
-        "n_layers" : 8,
+        "n_layers" : 6,
         "skip_in" : [4],
         "multires" : 6,
         "bias" : 0.5,
         "scale" : 3.0,
-        "geometric_init" : True,
+        "geometric_init" : False,
         "weight_norm" : True 
         }
     sdf_network = SDFNetwork(**settings)
