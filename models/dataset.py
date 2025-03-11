@@ -55,7 +55,7 @@ class Dataset:
         self.n_images = len(self.images_lis)
         self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
         self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
-        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis])
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -84,9 +84,8 @@ class Dataset:
         # import pdb; pdb.set_trace()
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
-
-        object_bbox_min = np.array([-0.1, -0.1,  -0.1, 1.0])
-        object_bbox_max = np.array([ 0.1,  0.1,  0.1,  1.0])
+        object_bbox_min = np.array([-0.2, -0.5,  -0.2, 1.0])
+        object_bbox_max = np.array([ 0.4,  0.1,  0.2,  1.0])
         # Object scale mat: region of interest to **extract mesh**
         object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]
@@ -164,8 +163,6 @@ class Dataset:
         self.H = h
 
     def gen_random_rays_at_pose_mat(self, transform_matrix, resolution_level=1):
-        pixels_x = torch.randint(low=0, high=self.W, size=[self.batch_size])
-        pixels_y = torch.randint(low=0, high=self.H, size=[self.batch_size])
         transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32))
         transform_matrix = transform_matrix.cuda()  # add to cuda
         transform_matrix.requires_grad_(True)
@@ -184,7 +181,7 @@ class Dataset:
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)  # H W 3
 
 
-    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1, intrinsic_inv=None, is_np=True): # default c2w is from np
+    def gen_rays_at_pose_mat(self, transform_matrix, resolution_level=1, intrinsic_inv=None, is_np=True): # default c2w is from npai
         if is_np:
             transform_matrix = torch.from_numpy(transform_matrix.astype(np.float32)).to(self.device)
         if intrinsic_inv is None:

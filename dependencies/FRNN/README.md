@@ -54,7 +54,7 @@ For manually gather nearest neighbors from idxs generated via frnn_grid_points:
   nn = frnn.frnn_gather(points2, idxs, lengths2)
 ```
 
-## Note
+## Notecd 
 
 For small point clouds (e.g. < 10,000 points), the bruteforce way (e.g. pytorch3d's KNN) might be faster.
 

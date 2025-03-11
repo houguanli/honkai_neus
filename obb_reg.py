@@ -1,5 +1,12 @@
 import numpy as np
 import open3d as o3d
+
+def quat_to_matrix(q):
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    return np.array([[1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * w * z, 2 * x * z + 2 * w * y],
+                     [2 * x * y + 2 * w * z, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * w * x],
+                     [2 * x * z - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y]])
+
 class Rect: # _right_hand
     def __init__(self, with_init=False, o = None, x = None, y = None, z = None):
         if not with_init:
@@ -289,6 +296,61 @@ def select_rect_from_full(fr1): # fr1 is a full rect
     print("ERR for this rec! ")
     return None
 
+def evaluate_extrinsic_difference(
+    M1: np.ndarray,
+    M2: np.ndarray,
+    rotation_threshold_deg: float = 5.0,
+    translation_threshold: float = 0.01
+) -> bool:
+    """
+    比较两个相机外参矩阵的差异，并判断是否在给定阈值范围内。
+
+    参数:
+    -------
+    M1 : np.ndarray
+        第一个外参矩阵，形状为 (4, 4)。
+    M2 : np.ndarray
+        第二个外参矩阵，形状为 (4, 4)。
+    rotation_threshold_deg : float
+        旋转角度阈值 (单位: 度)，用于判断两个矩阵的旋转差异是否可接受。
+    translation_threshold : float
+        平移距离阈值，用于判断两个矩阵的平移差异是否可接受。
+
+    返回:
+    -------
+    bool
+        如果两个外参矩阵的差异（旋转与平移）都在阈值范围内，返回 True；否则返回 False。
+    """
+
+    # 1. 计算相对变换矩阵 (M_rel = M1^-1 * M2)
+    #    其含义为：从 M1 对应的坐标系，变换到 M2 对应的坐标系
+    M_rel = np.linalg.inv(M1) @ M2
+
+    # 2. 提取旋转矩阵和平移向量
+    R_rel = M_rel[:3, :3]   # 相对旋转
+    t_rel = M_rel[:3, 3]    # 相对平移
+
+    # 3. 计算旋转差异（以角度为单位）
+    #    旋转矩阵 R 的旋转角度可通过以下公式计算：
+    #    angle = arccos((trace(R) - 1) / 2)
+    #    注意数值稳定性，可能需要 min/max 限制
+    trace_val = np.trace(R_rel)
+    # 防止浮点误差导致 arccos 参数超出 [-1, 1]
+    cos_angle = max(min((trace_val - 1.0) / 2.0, 1.0), -1.0)
+    rotation_angle_deg = np.degrees(np.arccos(cos_angle))
+
+    # 4. 计算平移差异（向量范数）
+    translation_diff = np.linalg.norm(t_rel)
+
+    # 5. 根据阈值进行判断
+    rotation_ok = (rotation_angle_deg <= rotation_threshold_deg)
+    translation_ok = (translation_diff <= translation_threshold)
+    print("rotation diff: ", rotation_angle_deg)
+    print("translation diff ", translation_diff)
+    return rotation_ok and translation_ok
+
+
+
 def generate_rec_index():
     return
 if __name__ == '__main__':
@@ -298,10 +360,10 @@ if __name__ == '__main__':
     # x = np.array([1, 0, 0])
     # r1 = Rect(with_init=True, o=o, x=x, y=y, z=z)
     # generate_enum_index(r1)
-    mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/synthetic_data/bunny/lie.obj',  'C:/Users/guanli.hou/Desktop/neural_rig/synthetic_data/bunny/stand.obj'
-
-    # mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon1.obj',  'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon2.obj'
-    mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/front.obj', 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/back.obj'
+    # mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/synthetic_data/bunny/lie.obj',  'C:/Users/guanli.hou/Desktop/neural_rig/synthetic_data/bunny/stand.obj'
+    #
+    mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon1.obj',  'C:/Users/guanli.hou/Desktop/neural_rig/real_world/dragon/dragon2.obj'
+    # mesh_path_rt60, mesh_path_stand = 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/front.obj', 'C:/Users/guanli.hou/Desktop/neural_rig/real_world/xbox/back.obj'
 
     target_sdf, source_sdf = Mesh2SDF(mesh_path_stand), Mesh2SDF(mesh_path_rt60)
     full_rect1, full_rect2 = target_sdf.calculate_obb_from_point_cloud(), source_sdf.calculate_obb_from_point_cloud()
@@ -315,9 +377,47 @@ if __name__ == '__main__':
     # point_cloud.points = o3d.utility.Vector3dVector(full_rect2)
     # o3d.io.write_point_cloud('C:/Users/guanli.hou/Desktop/stand.ply', point_cloud)
     print(raw_RT)
-    # print(raw_T)
+    print(raw_T)
 
     # res = judge_rect(o, x, y, z)
     # print(res)
     # res = judge_rect(o, x, y, -z)
     # print(res)
+    M1_example = [[0.7423551082611084, -0.2518492341041565, -0.6208710670471191, 0.49617502093315125], [-0.6630696654319763, -0.14315412938594818, -0.7347418069839478, 0.22048130631446838], [0.09616389870643616, 0.9571200609207153, -0.2732647955417633, 0.20496077835559845], [0.0, 0.0, 0.0, 1.0]]
+
+    M2_example = [[-0.9261959195137024, 0.004189362749457359, -0.37701937556266785, 0.2073606550693512], [0.37704265117645264, 0.010291064158082008, -0.926138699054718, 0.5093762874603271], [-2.3283061589829401e-10, -0.9999382495880127, -0.011111109517514706, 0.0061111110262572765], [0.0, 0.0, 0.0, 1.0]]
+
+    RT = np.array([
+            [
+                -0.5849950772807017,
+                0.801868264500357,
+                -0.12160610981579512,
+                0.2416590098834332
+            ],
+            [
+                0.8033941419548528,
+                0.5934671410150251,
+                0.04852427442093907,
+                -0.02324493170884405
+            ],
+            [
+                0.11107930603839655,
+                -0.06931117458706122,
+                -0.9913916223407326,
+                0.023850916562664706
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+            ]
+        ]) # a test for obb based exc finding
+    M1_example = RT @ M1_example # trans with raw RT
+    result = evaluate_extrinsic_difference(
+        M1_example,
+        M2_example,
+        rotation_threshold_deg=30.0,
+        translation_threshold=0.5
+    )
+    print("is differ:", result)

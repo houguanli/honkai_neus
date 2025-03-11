@@ -4,13 +4,16 @@
     "objects_cnt": 2,
     "batch_size": 512,
     "obj_confs": {
-        "0_conf": "./confs/thin_structure_white_bkgd.conf",
-        "0_name": "klee_back",
-        "1_conf": "./confs/thin_structure_white_bkgd.conf",
-        "1_name": "klee_front"
+        "0_conf": "./confs/thin_structure.conf",
+        "0_name": "keli_iphone_pos1",
+        "1_conf": "./confs/thin_structure.conf",
+        "1_name": "keli_iphone_pos2"
     },
-    "raw_translation" :[0.06639522, -0.00968835,  0.12580145],
-    "raw_quaternion"  :[0.16629259148338243 , 0.03458457108120108 , 0.9854272131923291 , 0.009159055462616342],
+    "raw_translation" :[ -0.10947776249360613, -0.06454726871495192, 0.09227380668230306],
+    "raw_quaternion"  :[0.782169074148122,
+-0.14501583866976703,
+0.5772749244106822,
+0.18421619806036296],
     "standard_index" : 1,
     "to_aligin_index": 0
 }

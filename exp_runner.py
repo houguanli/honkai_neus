@@ -19,6 +19,9 @@ from models.common import *
 import json
 import open3d as o3d
 from pathlib import Path
+from LoFTR_helper import filter_and_collect_pose_pairs, run_loftr_inference
+from similar_cam_pose_detect import find_near_camera_poses, find_K_near_camera_poses
+
 
 class Runner:
     def __init__(self, conf_path, mode='train', case='CASE_NAME', is_continue=False):
@@ -37,7 +40,9 @@ class Runner:
         os.makedirs(self.base_exp_dir, exist_ok=True)
         self.dataset = Dataset(self.conf['dataset'])
         self.iter_step = 0
-
+        self.image_dir = os.path.join(self.dataset.data_dir, 'image')
+        self.mask_dir  = os.path.join(self.dataset.data_dir, 'mask')
+        self.npz_path = os.path.join(self.dataset.data_dir, 'cameras_sphere.npz')
         # Training parameters
         self.end_iter = self.conf.get_int('train.end_iter')
         self.save_freq = self.conf.get_int('train.save_freq')
@@ -157,7 +162,7 @@ class Runner:
             self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
             self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
 
-            if self.iter_step % self.report_freq == 0:
+            if self.iter_step == 1 or self.iter_step % self.report_freq == 0:
                 print(self.base_exp_dir)
                 print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
 
@@ -215,7 +220,7 @@ class Runner:
 
     def load_checkpoint(self, checkpoint_name):
         checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name),
-                                map_location=self.device)
+                                map_location=self.device, weights_only=False)
         self.nerf_outside.load_state_dict(checkpoint['nerf'])
         self.sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
         self.deviation_network.load_state_dict(checkpoint['variance_network_fine'])
@@ -430,7 +435,6 @@ class Runner:
         else:
             print("No points are generated from SDF field")
         return zero_points, zero_mask      # note it returns a torch tensor
-    
     # this function is used for out calling 
     def generate_zero_sdf_points_with_RT(self, rays_o, rays_d, q, t, zero_sdf_thereshold=1e-3, inf_depth_thereshold=2.0): 
         # expand as 4x4mat 
@@ -507,34 +511,95 @@ class Runner:
             store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
         camera_c2w, intrinsic_inv = self.dataset.pose_all[image_index].clone(), self.dataset.intrinsics_all_inv[image_index].clone()
         rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_c2w, resolution_level=resolution_level,intrinsic_inv=intrinsic_inv, is_np=False)
-        # only bactchfy the rays in the mask
-        rays_mask = self.dataset.masks[image_index] > 0
+        rays_mask = self.dataset.masks[image_index] > 0.5
+        really_white = torch.tensor([True, True, True])
+        matches = (rays_mask == really_white).all(dim=2)
+        formatted_tensor = torch.zeros_like(rays_mask)
+        formatted_tensor[matches] = really_white
+        rays_mask = formatted_tensor
         rays_o, rays_d = rays_o[rays_mask], rays_d[rays_mask]
         rays_o = rays_o.reshape(-1, 3)
         rays_d = rays_d.reshape(-1, 3)
         rays_sum, process_flag = len(rays_o), 0
-        zero_points_all, zero_mask_all = np.empty((0,3)), np.empty((0,1))
+        zero_points_all, zero_mask_all = np.empty((0,3)), np.empty((0,1), dtype=bool)
         for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size), rays_d.split(self.batch_size)):
-            # with torch.no_grad():
             zero_points, zero_mask = self.generate_zero_sdf_points(rays_o=rays_o_batch, rays_d=rays_d_batch)
             if zero_points is None:
                 continue
             zero_points = zero_points.detach().cpu().numpy()
             zero_mask = zero_mask.detach().cpu().numpy()
             zero_mask = zero_mask.reshape(-1, 1)
-            # import pdb; pdb.set_trace()
-            
             zero_points_all = np.concatenate((zero_points_all, zero_points), axis=0) # contact results
             zero_mask_all   = np.concatenate((zero_mask_all, zero_mask), axis=0)  # contact mask results
             del zero_points, zero_mask
             process_flag += self.batch_size
-            # print("calculating rays ", process_flag, "with total ", rays_sum)
         if write_out_flag:
             point_cloud = o3d.geometry.PointCloud()
-            point_cloud.points = o3d.utility.Vector3dVector(zero_points_all)
+            point_cloud.points = o3d.utility.Vector3dVector(zero_points_all[zero_mask_all.flatten()])
             o3d.io.write_point_cloud(store_path, point_cloud)
         return zero_points_all, zero_mask_all
-    
+
+# set the limitation to the color using color_threshold to avoid get the pure black color with zero sdf value
+    def generate_and_save_points_ply_single_with_color(self, store_path=None, image_index=0, resolution_level=1,
+                                            write_out_flag=True, color_threshold=0.1):
+        if store_path is None:
+            store_dir = Path("debug", "zero_points_test")
+            if not os.path.exists(store_dir):
+                os.makedirs(store_dir)
+            store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
+        camera_c2w, intrinsic_inv = self.dataset.pose_all[image_index].clone(), self.dataset.intrinsics_all_inv[
+            image_index].clone()
+        rays_o, rays_d = self.dataset.gen_rays_at_pose_mat(camera_c2w, resolution_level=resolution_level,
+                                                           intrinsic_inv=intrinsic_inv, is_np=False)
+
+        rays_mask = self.dataset.masks[image_index] > 0.5
+        really_white = torch.tensor([True, True, True])
+        matches = (rays_mask == really_white).all(dim=2)
+        formatted_tensor = torch.zeros_like(rays_mask)
+        formatted_tensor[matches] = really_white
+        rays_mask = formatted_tensor
+        rays_o, rays_d = rays_o[rays_mask], rays_d[rays_mask]
+        rays_o = rays_o.reshape(-1, 3)
+        rays_d = rays_d.reshape(-1, 3)
+        rays_sum, process_flag = len(rays_o), 0
+        zero_points_all, zero_mask_all = np.empty((0, 3)), np.empty((0, 1), dtype=bool)
+        for rays_o_batch, rays_d_batch in zip(rays_o.split(self.batch_size), rays_d.split(self.batch_size)):
+            # calc the render result in this view direction
+            near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
+            background_rgb = torch.zeros([1, 3]) if self.use_white_bkgd else None
+            render_out = self.renderer.render(rays_o_batch,
+                                              rays_d_batch,
+                                              near,
+                                              far,
+                                              cos_anneal_ratio=self.get_cos_anneal_ratio(),
+                                              background_rgb=background_rgb)
+            colors = render_out['color_fine']
+            zero_points, zero_mask = self.generate_zero_sdf_points(rays_o=rays_o_batch, rays_d=rays_d_batch)
+
+            #drag out the color mask
+            color_sum = torch.sum(colors, dim=-1)
+            color_mask = (color_sum > color_threshold)
+            if zero_points is None:
+                continue
+            zero_points = zero_points.detach().cpu().numpy()
+            zero_mask = zero_mask.detach().cpu().numpy()
+            color_mask = color_mask.detach().cpu().numpy()
+            color_mask = color_mask.reshape(-1, 1)
+            zero_mask = zero_mask.reshape(-1, 1)
+            #combine the color_mask and zero_mask
+            zero_mask = (zero_mask & color_mask).astype(bool)  # Keeping it binary (0 or 1)
+            zero_points_all = np.concatenate((zero_points_all, zero_points), axis=0)  # contact results
+            zero_mask_all = np.concatenate((zero_mask_all, zero_mask), axis=0)  # contact mask results
+            del zero_points, zero_mask
+            process_flag += self.batch_size
+            # print("at process ", process_flag, " rays")
+        if write_out_flag:
+            point_cloud = o3d.geometry.PointCloud()
+            point_cloud.points = o3d.utility.Vector3dVector(zero_points_all[zero_mask_all.flatten()])
+            o3d.io.write_point_cloud(store_path, point_cloud)
+        return zero_points_all, zero_mask_all
+
+
     # this function generate ALL zero-sdf points of ALL training image, and save it as a ply file if write_out_flag
     # returns np array
     def generate_zero_points_full(self, store_dir=None, save_per_image=False, write_out_flag=True):
@@ -560,7 +625,7 @@ class Runner:
    
     def generate_zero_points_full_with_masks(self, store_dir=None, save_per_image=False, write_out_flag=True):
         if store_dir is None:
-            store_dir = store_dir = Path("debug", "zero_points_test")
+            store_dir = Path("debug", "zero_points_test")
         if not os.path.exists(store_dir):
             os.makedirs(store_dir)
         singe_points_full, zero_sdf_points_all, points_mask_full = np.empty((0, 3)), [], np.empty((0, 1))
@@ -581,19 +646,45 @@ class Runner:
             store_path = str(store_dir) + "/" + self.name + "_full_mask.txt"
             np.savetxt(store_path, points_mask_full, fmt='%d')
         return zero_sdf_points_all, points_mask_full
-        
+
+    def generate_zero_points_full_with_masks_and_color(self, store_dir=None, save_per_image=False, write_out_flag=True, down_sample_final=True):
+        if store_dir is None:
+            store_dir = Path("debug", "zero_points_test")
+        if not os.path.exists(store_dir):
+            os.makedirs(store_dir)
+        singe_points_full, zero_sdf_points_all, points_mask_full = np.empty((0, 3)), [], np.empty((0, 1))
+
+        for image_index in range(0, len(self.dataset.images)-53):
+            store_path = str(store_dir) + "/" + self.name + "_" + str(image_index) + ".ply"
+            # generate this for every image
+            singe_points_full_single_image, points_mask = \
+                self.generate_and_save_points_ply_single_with_color(store_path, image_index=image_index, resolution_level=1,
+                                                         write_out_flag=save_per_image)
+            singe_points_full = np.concatenate((singe_points_full, singe_points_full_single_image),
+                                               axis=0)  # contact results
+            zero_sdf_points_all.append(singe_points_full_single_image)
+            points_mask_full = np.concatenate((points_mask_full, points_mask), axis=0)  # contact results
+            print_blink("concatenated points generated from image " + str(image_index))
+        # import pdb; pdb.set_trace()
+        singe_points_full = singe_points_full[points_mask_full.flatten().astype(bool)]
+        if down_sample_final: # down sample the final
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(np.array(singe_points_full))
+            pcd = pcd.voxel_down_sample(voxel_size=0.001)  # Adjust voxel_size as needed
+            zero_sdf_points_all = np.asarray(pcd.points)
+
+        if write_out_flag:
+            point_cloud = o3d.geometry.PointCloud()  # auto write out
+            store_path = str(store_dir) + "/" + self.name + "_full.ply"
+            point_cloud.points = o3d.utility.Vector3dVector(np.array(zero_sdf_points_all))
+            o3d.io.write_point_cloud(store_path, point_cloud)
+            store_path = str(store_dir) + "/" + self.name + "_full_mask.txt"
+            np.savetxt(store_path, points_mask_full, fmt='%d')
+        return zero_sdf_points_all
+
     def render_novel_image_with_RTKM(self, post_fix=1, original_mat=None, intrinsic_mat=None, q=None, t=None,
                                      img_W=800, img_H=600, return_render_out=False, resolution_level=1):
         if q is None or t is None:
-            q, t = [1, 0, 0, 0], [0, 0, 0] # this is a default setting
-            # q = [0, 0, 1, 0] 
-            # t = [0, -0.01, 0.066] # soap1 pose to soap2 pose 
-            # q = [0.9150, -0.2691, -0.1273,  0.2763]
-            # t = [0.1536, -0.1478,  0.3126]  # frame 0 qt calced from soap2 pose (default), IMP: pose2 is the default rendering pose !
-            # q = [0.12746657701903685 , -0.27666154933511306 , 0.9138042514674574 , -0.26945212785406775]
-            # t = [0.13278135983999997 , -0.12696580667999996 , 0.3725301366] # eqv rt for soap1 pose   
-            # q = [ 0.6053165197372437, 0.2681955397129059, -0.37045902013778687, 0.6537007689476013]
-            # t = [ 0.24793949723243713, 0.6238101124763489, 0.677591860294342] # 20th frame qt for pose2
             q, t = [0.1830127090215683,-0.6830127239227295,-0.1830127090215683,-0.6830127239227295],[0.1000, 0.40000, 0.25],
         w, x, y, z = q
         if original_mat is None:
@@ -658,12 +749,6 @@ class Runner:
         intrinsic_inv = torch.from_numpy(np.linalg.inv(intrinsic_mat).astype(np.float32)).cuda()
         camera_pose = np.array(original_mat)
         transform_matrix = transform_matrix @ camera_pose
-        # transform_matrix = np.array([
-        #     [0.0433,   0.0397, -0.9953,  0.8153],
-        #     [ 0.9944,  -0.0608,  0.0418,  0.1112],
-        #     [-0.0613, -0.9963, -0.0445,  0.1639],
-        #     [ 0.0,          0.0,          0.0, 1]
-        # ]) # tmp
         self.dataset.W = img_W
         self.dataset.H = img_H
         # print("equivalent c2w mat: \n", transform_matrix)
@@ -683,6 +768,222 @@ class Runner:
 
     def get_runner(neus_conf_path, case_name, is_continue):
         return Runner(neus_conf_path, mode="train", case=case_name, is_continue=is_continue)
+
+def generate_surface_points_between_poses(
+        neus_runner_source: Runner = None,
+        neus_runner_target: Runner = None,
+        write_out_flag = False,
+        out_path_pose1 = None,
+        out_path_pose2 = None,
+        delta_RT = None # this apply to the source, noticing that we define runner1 as the source, deltaRT @ source = target
+):
+    """
+    Example function: the first step is to retrieve the image and mask
+    directories from each runner, then call 'filter_and_collect_pose_pairs'
+    to get all matching pose pairs.
+
+    Args:
+        neus_runner_source (Runner): First NEUS runner instance.
+        neus_runner_target (Runner): Second NEUS runner instance.
+
+    Returns:
+        list of dict: The camera-pose pairs (and associated file paths)
+                      that pass the filtering criteria.
+    """
+
+    # 1) Extract directories for images and masks from each runner.
+    #    The runner stores e.g. '.../image/*.png', so we strip off the filename pattern.
+    if neus_runner_source is None or neus_runner_target is None:
+        # Example placeholders for config and case. Replace with your actual defaults.
+        default_conf_path_1 = "./confs/thin_structure.conf" # use keli as a default conf
+        default_case_name_1 = "keli_iphone_pos2"
+
+        default_conf_path_2 = "./confs/thin_structure.conf"
+        default_case_name_2 = "keli_iphone_pos1"
+        delta_RT = [[0.2656361080376526, -0.45560444077280526, 0.8496246533939018, -0.10947776249360613],
+                    [0.12074841154703944, 0.8900695978141784, 0.4395405921593288, -0.06454726871495192],
+                    [-0.9564817192270196, -0.014167024917251636, 0.2914481363630905, 0.09227380668230306],
+                    [0.0, 0.0, 0.0, 1.0]]  # Placeholder for demonstration
+
+        neus_runner_source = Runner.get_runner(neus_conf_path=default_conf_path_1, case_name=default_case_name_1, is_continue=True)
+        neus_runner_target = Runner.get_runner(neus_conf_path=default_conf_path_2, case_name=default_case_name_2, is_continue=True)
+
+    # 2) Call 'filter_and_collect_pose_pairs' using these paths and the .npz pose files.
+    #    Here, we set delta_RT=None and K=0 for demonstration. Adjust as needed.
+    pairs_info = filter_and_collect_pose_pairs(
+        npz1_path       = neus_runner_source.npz_path,
+        images1_folder  = neus_runner_source.image_dir,
+        masks1_folder   = neus_runner_source.mask_dir,
+        npz2_path       = neus_runner_target.npz_path,
+        images2_folder  =  neus_runner_target.image_dir,
+        masks2_folder   = neus_runner_target.mask_dir,
+        delta_RT        = delta_RT #
+    )
+
+    # ---------------------- Part 2: LoFTR Inference on Each Pair ----------------------
+    # For each matched pair, run LoFTR inference to get matches/confidences.
+    rays_o_pose1_all, rays_d_pose1_all, rays_o_pose2_all, rays_d_pose2_all = [], [], [], []
+    for pair in pairs_info:
+        img0_path  = pair["img1"]
+        img1_path  = pair["img2"]
+        # Example LoFTR inference call
+        matches, confidences = run_loftr_inference(
+            img0_path      = img0_path,
+            img1_path      = img1_path,
+            use_eloftr     = True,        # or False, as needed
+            write_out_flag = False        # set True if you want to save any debug images
+        )
+        mask0_path = pair["mask1"]
+        mask1_path = pair["mask2"]
+        # Store the matching results in the same dictionary
+        pair["matches"]     = matches
+        pair["confidences"] = confidences
+        mask0_rgb = cv.imread(mask0_path, cv.IMREAD_COLOR)
+        mask1_rgb = cv.imread(mask1_path, cv.IMREAD_COLOR)
+        mask0_bin = (np.all(mask0_rgb == [255, 255, 255], axis=-1)).astype(np.uint8)
+        mask1_bin = (np.all(mask1_rgb == [255, 255, 255], axis=-1)).astype(np.uint8)
+        #   matches[i, 0, :] = (x0, y0) in image0
+        #   matches[i, 1, :] = (x1, y1) in image1
+        x0 = matches[:, 0, 0]
+        y0 = matches[:, 0, 1]
+        x1 = matches[:, 1, 0]
+        y1 = matches[:, 1, 1]
+        # Keep only those matches for which both masks have a value of 1 at the matched pixels
+        valid_mask = (mask0_bin[y0, x0] == 1) & (mask1_bin[y1, x1] == 1)
+        # valid_mask = (mask0[x0, y0] == 1) & (mask1[y1, x1] == 1)
+        # Filter matches and confidences accordingly
+        filtered_matches = matches[valid_mask]
+        filtered_confidences = confidences[valid_mask]
+
+        #generate rays o and rays d and filter based on the pairs detected
+        image_pose1_index = pair['idx1']
+        camera_c2w_pose1, intrinsic_inv_pose1 = neus_runner_source.dataset.pose_all[image_pose1_index].clone(), neus_runner_source.dataset.intrinsics_all_inv[
+            image_pose1_index].clone()
+        rays_o_pose1, rays_d_pose1 = neus_runner_source.dataset.gen_rays_at_pose_mat(camera_c2w_pose1, resolution_level=1,
+                                                           intrinsic_inv=intrinsic_inv_pose1, is_np=False)
+        image_pose2_index = pair['idx2']
+        camera_c2w_pose2, intrinsic_inv_pose2 = (
+            neus_runner_target.dataset.pose_all[image_pose2_index].clone(),
+            neus_runner_target.dataset.intrinsics_all_inv[image_pose2_index].clone()
+        )
+        rays_o_pose2, rays_d_pose2 = neus_runner_target.dataset.gen_rays_at_pose_mat(
+            camera_c2w_pose2,
+            resolution_level=1,
+            intrinsic_inv=intrinsic_inv_pose2,
+            is_np=False
+        )
+        # Extract pixel coordinates from the filtered matches
+        # Note that the indexing in the rays arrays is [y, x, :].
+        x0s = filtered_matches[:, 0, 0]
+        y0s = filtered_matches[:, 0, 1]
+        x1s = filtered_matches[:, 1, 0]
+        y1s = filtered_matches[:, 1, 1]
+
+        # If rays_o_pose1, rays_d_pose1 are PyTorch tensors, we can index them directly.
+        # Make sure x0s, y0s, x1s, y1s are tensors or convert them.
+        if not isinstance(x0s, torch.Tensor):
+            x0s = torch.from_numpy(x0s.astype(np.int64))
+            y0s = torch.from_numpy(y0s.astype(np.int64))
+            x1s = torch.from_numpy(x1s.astype(np.int64))
+            y1s = torch.from_numpy(y1s.astype(np.int64))
+        # Gather the matched rays for pose1
+        pose1_rays_o_matched = rays_o_pose1[y0s, x0s]  # shape (N, 3)
+        pose1_rays_d_matched = rays_d_pose1[y0s, x0s]  # shape (N, 3)
+
+        # Gather the matched rays for pose2
+        pose2_rays_o_matched = rays_o_pose2[y1s, x1s]  # shape (N, 3)
+        pose2_rays_d_matched = rays_d_pose2[y1s, x1s]  # shape (N, 3)
+        # import pdb; pdb.set_trace()
+        rays_o_pose1_all.append(pose1_rays_o_matched)
+        rays_d_pose1_all.append(pose1_rays_d_matched)
+        rays_o_pose2_all.append(pose2_rays_o_matched)
+        rays_d_pose2_all.append(pose2_rays_d_matched)
+        # Store back into 'pair'
+        pair["matches"] = filtered_matches
+        pair["confidences"] = filtered_confidences
+
+    # 3) Return the matching pairs (or proceed with further logic).
+
+    if len(rays_o_pose1_all) > 0:
+        rays_o_pose1_all = torch.cat(rays_o_pose1_all, dim=0)  # (TotalN, 3)
+        rays_d_pose1_all = torch.cat(rays_d_pose1_all, dim=0)  # (TotalN, 3)
+        rays_o_pose2_all = torch.cat(rays_o_pose2_all, dim=0)  # (TotalN, 3)
+        rays_d_pose2_all = torch.cat(rays_d_pose2_all, dim=0)  # (TotalN, 3)
+    else:
+        # If no matches were found, create empty tensors
+        print("error! no pairs have been detected in this case")
+        rays_o_pose1_all = torch.empty(0, 3)
+        rays_d_pose1_all = torch.empty(0, 3)
+        rays_o_pose2_all = torch.empty(0, 3)
+        rays_d_pose2_all = torch.empty(0, 3)
+    batch_size = 512
+
+    # Prepare lists to collect zero-SDF points from pose1 and pose2
+    zero_sdf_pose1_list = []
+    zero_sdf_pose2_list = []
+
+    # Number of total rays
+    num_rays = rays_o_pose1_all.shape[0]  # same as rays_o_pose2_all.shape[0], presumably
+    # import pdb;
+    # pdb.set_trace()
+    for start_idx in range(0, num_rays, batch_size):
+        end_idx = start_idx + batch_size
+
+        # 1) Extract the current batch of rays for pose1
+        batch_rays_o_pose1 = rays_o_pose1_all[start_idx:end_idx]
+        batch_rays_d_pose1 = rays_d_pose1_all[start_idx:end_idx]
+
+        # 2) Extract the current batch of rays for pose2
+        batch_rays_o_pose2 = rays_o_pose2_all[start_idx:end_idx]
+        batch_rays_d_pose2 = rays_d_pose2_all[start_idx:end_idx]
+
+        # 3) Call generate_zero_sdf_points on pose1's batch
+        #    (Assuming neus_runner_source has this method defined.)
+        zero_sdf_points_pose1, zero_sdf_points_pose1_mask = neus_runner_source.generate_zero_sdf_points(
+            rays_o=batch_rays_o_pose1,
+            rays_d=batch_rays_d_pose1,
+            zero_sdf_thereshold=1e-3,
+            inf_depth_thereshold=2.0,
+            return_all=False # only valid cor points
+        )
+        zero_sdf_pose1_list.append(zero_sdf_points_pose1)
+        #    (Assuming neus_runner_target has this method defined.)
+
+        # 4) Call generate_zero_sdf_points on pose2's batch
+        zero_sdf_points_pose2, zero_sdf_points_pose2_mask = neus_runner_target.generate_zero_sdf_points(
+            rays_o=batch_rays_o_pose2,
+            rays_d=batch_rays_d_pose2,
+            zero_sdf_thereshold=1e-3,
+            inf_depth_thereshold=2.0,
+            return_all=False # only valid cor points
+        )
+        zero_sdf_pose2_list.append(zero_sdf_points_pose2)
+
+    # 5) Concatenate all batches into final torch tensors
+    if len(zero_sdf_pose1_list) > 0:
+        zero_sdf_pose1_all = torch.cat(zero_sdf_pose1_list, dim=0)
+        zero_sdf_pose2_all = torch.cat(zero_sdf_pose2_list, dim=0)
+    else:
+        # If no rays or no matches, create empty tensors
+        zero_sdf_pose1_all = torch.empty(0, 3)
+        zero_sdf_pose2_all = torch.empty(0, 3)
+    #batchify those rays and get final
+    if write_out_flag:
+        if out_path_pose1 is None or out_path_pose2 is None:
+            out_path_pose1, out_path_pose2 = "./exp/LoFTR/keli_pose2.ply", "./exp/LoFTR/e-LoFTR-keli_pose1.ply"
+        points_pose1 = zero_sdf_pose1_all.detach().cpu().numpy()
+        points_pose2 = zero_sdf_pose2_all.detach().cpu().numpy()
+
+        # 2) Create Open3D point cloud objects
+        pcd_pose1 = o3d.geometry.PointCloud()
+        pcd_pose1.points = o3d.utility.Vector3dVector(points_pose1)
+
+        pcd_pose2 = o3d.geometry.PointCloud()
+        pcd_pose2.points = o3d.utility.Vector3dVector(points_pose2)
+        # 4) Write the point clouds to disk
+        o3d.io.write_point_cloud(out_path_pose1, pcd_pose1)
+        o3d.io.write_point_cloud(out_path_pose2, pcd_pose2)
+    return zero_sdf_pose1_all, zero_sdf_pose2_all
 
 
 if __name__ == '__main__':
@@ -704,11 +1005,18 @@ if __name__ == '__main__':
     parser.add_argument('--resolution_level', type=int, default=1)
     parser.add_argument('--store_dir', type=str, default=None)
     args = parser.parse_args()
-    torch.cuda.set_device(args.gpu) 
+    torch.cuda.set_device(args.gpu)
+    if args.mode == "generate_surface_points_between_poses":
+        generate_surface_points_between_poses(write_out_flag=True)
+        exit()
     runner = Runner(args.conf, args.mode, args.case, args.is_continue)
 
     if args.mode == 'train':
         runner.train()
+        """cv.imwrite(os.path.join(runner.base_exp_dir,
+                                'validations_fine',
+                                'fuck.png'),
+                   np.concatenate([runner.dataset.image_at(0, resolution_level=1)]))"""
     elif args.mode == 'validate_mesh':
         runner.validate_mesh(world_space=False, resolution=512, threshold=args.mcube_threshold)
     elif args.mode == 'validate_image':
@@ -716,7 +1024,9 @@ if __name__ == '__main__':
     elif args.mode == 'generate_points':
         runner.generate_zero_points_full(store_dir=args.store_dir)
     elif args.mode == 'generate_points_wm':
-        runner.generate_zero_points_full_with_masks(store_dir=args.store_dir)
+        runner.generate_zero_points_full_with_masks(store_dir=args.store_dir, save_per_image=True)
+    elif args.mode == 'generate_points_wc':
+        runner.generate_zero_points_full_with_masks_and_color(store_dir=args.store_dir, save_per_image=True)
     elif args.mode == 'render_rtkm':
         runner.render_novel_image_with_RTKM(post_fix=args.post_fix, resolution_level=args.resolution_level)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices
@@ -724,6 +1034,8 @@ if __name__ == '__main__':
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
+
+
 
 """
 conda activate neus
@@ -738,4 +1050,7 @@ python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 3 --case dragon_pos1 --store_dir ./exp/dragon_pos1
 python exp_runner.py --mode generate_points --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case dragon_pos2 --store_dir ./exp/dragon_pos2
 python exp_runner.py --mode generate_points_wm --conf ./confs/thin_structure_white_bkgd.conf --is_continue --gpu 0 --case dragon_pos2 --store_dir ./exp/dragon_pos2
+python exp_runner.py --mode generate_points_wm --conf ./confs/thin_structure.conf --is_continue --gpu 0 --case keli_iphone_pos1 --store_dir ./exp/keli_iphone_pos1
+python exp_runner.py --mode generate_points_wc --conf ./confs/thin_structure.conf --is_continue --gpu 0 --case keli_iphone_pos1 --store_dir ./exp/keli_iphone_pos1
+python exp_runner.py --mode generate_surface_points_between_poses  --conf ./confs/thin_structure.conf --case keli_iphone_pos1 
 """

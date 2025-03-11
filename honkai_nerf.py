@@ -16,6 +16,8 @@ from pathlib import Path
 import os
 import torch.nn as nn
 from AABB_helper import PointCloud2AABBTree
+from exp_runner import generate_surface_points_between_poses
+import robust_loss_pytorch as robust
 
 def load_cameras_and_images(images_path, masks_path, camera_params_path, frames_count, with_fixed_camera=False,
                             camera_params_list=None, pic_mode="png"):  # assmue load from a json file
@@ -105,11 +107,12 @@ def transfer_points_to_local_axis(points, quaternion, translation, device="cuda"
     transform_matrix[0:3, 0:3] = rotate_mat
     transform_matrix[0:3, 3] = translation
     transform_matrix[3, 3] = 1.0
-    ones_row = torch.ones(1, points.shape[1], dtype=points.dtype, device=points.device)
-    points_extended = torch.cat((points, ones_row), dim=0)
-    transfered_points = points_extended * transform_matrix
+    ones_row = torch.ones(1, points.shape[0], dtype=points.dtype, device=points.device)
+    # import pdb; pdb.set_trace()
+    points_extended = torch.cat((points.T, ones_row), dim=0)
+    transfered_points = transform_matrix @ points_extended
     points_3d = transfered_points[:-1, :]
-    return points_3d
+    return points_3d.T
     
 class HonkaiStart(torch.nn.Module):
     def __init__(self, setting_json_path):
@@ -125,22 +128,30 @@ class HonkaiStart(torch.nn.Module):
         self.raw_translation = torch.tensor(reg_data['raw_translation'], dtype=torch.float32, requires_grad=True) # this para is raw from bbox align
         self.raw_quaternion  = torch.tensor(reg_data['raw_quaternion'] , dtype=torch.float32, requires_grad=True) # 
         self.objects, self.obj_masks, self.obj_names, self.aabb_trees = [], [], [], []
+        self.zeroset_points_pose1, self.zeroset_points_pose2 = None, None
         for index in range (0, self.objects_cnt):
             current_name = str(index)
             current_obj_conf_path = reg_data['obj_confs'][current_name + "_conf"]
             current_obj_name = reg_data['obj_confs'][current_name + "_name"]
-            current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
+            # current_npz_name = reg_data['obj_confs'][current_name + "_npz"]
             current_exp_runner = Runner.get_runner(current_obj_conf_path, current_obj_name, is_continue=True)
-            current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name)
+            # current_aabb_tree = PointCloud2AABBTree.get_aabb_tree(current_npz_name)
             # pack this neus as a exp_runner in neus
             self.objects.append(current_exp_runner)
             current_sum = torch.sum(current_exp_runner.dataset.images, dim=-1)
             current_mask = (current_sum > 0.02)
             self.obj_masks.append(current_mask)
             self.obj_names.append(current_obj_name)
-            self.aabb_trees.append(current_aabb_tree)
+            # self.aabb_trees.append(current_aabb_tree)
         self.W, self.H = self.obj_masks[0].shape[2], self.obj_masks[0].shape[1] # notice the index, self.obj_masks contains N sets of masks
-        
+        self.adaptive_loss = robust.AdaptiveLossFunction(
+            num_dims=1,
+            float_dtype=torch.float,
+            device=torch.device('cuda:0'), # or 'cpu'
+            alpha_lo=1e-6,
+            alpha_hi=1.0,
+            scale_init=1.0
+        )
     def get_transform_matrix(self, translation, quaternion):
         w, x, y, z = quaternion
         transform_matrix = torch.tensor([
@@ -181,15 +192,85 @@ class HonkaiStart(torch.nn.Module):
             return calc_equ_c2w
     
     def refine_rt_forward(self, standard_index, to_aligin_index, vis_folder=None, write_out="full", iter_id = 0, 
-                          images_total = -1, start_index=0, single_image_refine=False): # refine the rt from to_aligin_index to standard_index
+                          images_total = -1, start_index=0, single_image_refine=False, refine_mode = "RGB"): # refine the rt from to_aligin_index to standard_index
         # raw_quad, raw_trans are set from the init or the optimizer
-        # TODO:: select poses to make sure it is generate from a both-available area
+        # standard_index = source, to_align = target
         if images_total < 0:
             images_total = len(self.obj_masks[standard_index]) # as default
         # print_info("running with ", images_total, "in total")
         global_loss, visited = 0, False
         neus_standard, neus_to_aligin = self.objects[standard_index], self.objects[to_aligin_index]
         debug_rgb = []
+        if refine_mode == "SDF":
+            # use sdf loss for reg, no need to visit images
+            coarse_RT, coarse_RT_inv = self.get_transform_matrix(translation=self.raw_translation, quaternion=self.raw_quaternion)
+            if write_out == "full" and vis_folder is not None:
+                debug_path = vis_folder / str(iter_id)  # vis_folder is a path item
+                out_path_pose1 = str(debug_path) + "/" +  self.obj_names[standard_index] + ".ply" # apply rt
+                out_path_pose2 = str(debug_path) + "/" +  self.obj_names[to_aligin_index] + ".ply"
+                if not debug_path.exists():
+                    os.makedirs(debug_path)
+            else:
+                out_path_pose1, out_path_pose2 = None, None
+            if self.zeroset_points_pose1 is None: # need run eloftr init
+                with torch.no_grad():
+                    self.zeroset_points_pose1, self.zeroset_points_pose2 = generate_surface_points_between_poses(
+                        neus_runner_source=neus_standard, neus_runner_target=neus_to_aligin, delta_RT=coarse_RT.clone().detach().cpu().numpy(),
+                        write_out_flag=vis_folder is not None, out_path_pose1=out_path_pose1, out_path_pose2=out_path_pose2)
+            zeroset_points_pose1_22_3d = transfer_points_to_local_axis(self.zeroset_points_pose1, translation=self.raw_translation, quaternion=self.raw_quaternion)
+            # Transpose (N,3) -> (3,N), then cat a row of ones -> (4,N)
+            # zeroset_points_pose1_h = torch.cat([zeroset_points_pose1.T, ones], dim=0)  # shape (4,N)
+            # # 2) Multiply (4,4) x (4,N) => (4,N)
+            # zeroset_points_pose1_22 = coarse_RT @ zeroset_points_pose1_h  # shape (4,N)
+            # # 3) Do the same for zeroset_points_pose2
+            # M = zeroset_points_pose2.shape[0]
+            # ones2 = torch.ones(1, M, device=zeroset_points_pose2.device, dtype=zeroset_points_pose2.dtype)
+            # zeroset_points_pose2_h = torch.cat([zeroset_points_pose2.T, ones2], dim=0)  # shape (4,M)
+            # zeroset_points_pose2_21 = coarse_RT_inv @ zeroset_points_pose2_h  # shape (4,M)
+            # zeroset_points_pose1_22_3d = zeroset_points_pose1_22[:3].T  # shape (N,3)
+            # zeroset_points_pose2_21_3d = zeroset_points_pose2_21[:3].T  # shape (M,3)
+            n_pts = zeroset_points_pose1_22_3d.shape[0]
+            sdf_vals_122 = neus_to_aligin.sdf_network.sdf(zeroset_points_pose1_22_3d).contiguous().squeeze()
+            # sdf_vals_221 = neus_standard.sdf_network.sdf(zeroset_points_pose2_21_3d).contiguous().squeeze()
+            # loss_221 = sdf_vals_221.abs().sum() / n_pts * 100
+            # robust.lossfun(...) returns elementwise losses with shape (N,).
+            # We'll take the mean across the batch, then multiply by 100 to scale similarly to your old code.
+            sdf_vals_122_shaped = sdf_vals_122.view(-1, 1)  # shape (N,1)
+            robust_losses_122 = self.adaptive_loss.lossfun(sdf_vals_122_shaped)
+            global_loss = robust_losses_122.mean()
+            global_loss.backward()
+            # n_pts = zeroset_points_pose1_22_3d.shape[0]
+            # start, all_pts = 0, 0
+            # while start < n_pts:
+            #     end = min(start + self.batch_size, n_pts)
+            #     batch_pts = zeroset_points_pose1_22_3d[start:end]  # (B, 3)
+            #     sdf_vals = neus_to_aligin.sdf_network.sdf(batch_pts).contiguous().squeeze()
+            #     loss_122 = sdf_vals.abs().sum() / n_pts * 100
+            #     loss_122.backward(retain_graph=True )
+            #     global_loss = global_loss + loss_122.clone().detach()
+            #     start = end
+            #     torch.cuda.synchronize()
+            #     del loss_122
+            # print ("122 sdf loss, ", global_loss, "for ", n_pts, " pts")
+            # all_pts = all_pts + n_pts
+            # n_pts = zeroset_points_pose2_21_3d.shape[0]
+            # start = 0
+            # while start < n_pts:
+            #     end = min(start + self.batch_size, n_pts)
+            #     batch_pts = zeroset_points_pose2_21_3d[start:end]  # (B, 3)
+            #     sdf_vals = neus_standard.sdf_network.sdf(batch_pts).contiguous().squeeze()
+            #     loss_221 = sdf_vals.abs().sum() / n_pts * 100
+            #     loss_221.backward(retain_graph=True )
+            #     global_loss = global_loss + loss_221.clone().detach()
+            #     start = end
+            #     torch.cuda.synchronize()
+            #     del loss_221
+            # print ("acc 112 + 221 sdf loss, ", global_loss, "for ", n_pts, " pts")
+            # all_pts = all_pts + n_pts
+            # import pdb; pdb.set_trace()
+            return global_loss , n_pts > 0
+
+
         for image_index in range(start_index, start_index + images_total):
             # calc both equv z < 0, assumes in standard it is > 0, so only care about the equv in to_aligin_index
             orgin_mat_c2w = neus_standard.dataset.pose_all[image_index]
@@ -288,17 +369,26 @@ def get_optimizer(mode, honkaiStart):
             [
                 {'params': getattr(honkaiStart, 'raw_translation'), 'lr': 1e-4},
                 {'params': getattr(honkaiStart, 'raw_quaternion'), 'lr': 1e-4},
+                {'params': list(getattr(honkaiStart, 'adaptive_loss').parameters()), 'lr': 1e-2}
             ],
             amsgrad=False
         )
     return optimizer
 
-def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=False, single_sub_length=1, write_out=None): # runs as a train function 
+def refine_rt(honkaiStart : HonkaiStart, refine_mode = "RGB", vis_folder=None, single_image_refine=False, single_sub_length=1, write_out=None): # runs as a train function
     def refine_rt_forward(optimizer, iter_id=-1, start_index=-1):
         optimizer.zero_grad()
         if vis_folder != None:
             if not os.path.exists(vis_folder):
                 os.makedirs(vis_folder)
+        if refine_mode == "SDF":
+            loss, visited = honkaiStart.refine_rt_forward(standard_index=honkaiStart.standard_index,
+                                                          to_aligin_index=honkaiStart.to_aligin_index,
+                                                          vis_folder=vis_folder, write_out=write_out, iter_id=iter_id,
+                                                          single_image_refine=single_image_refine, images_total=1,
+                                                          start_index=start_index,
+                                                          refine_mode=refine_mode)
+            return loss, visited
         if single_image_refine: # calc single image before refine
             loss, visited = honkaiStart.refine_rt_forward(standard_index = honkaiStart.standard_index, to_aligin_index=honkaiStart.to_aligin_index, 
             vis_folder=vis_folder, write_out=write_out, iter_id = iter_id, single_image_refine=single_image_refine, images_total=1, start_index=start_index)
@@ -320,8 +410,8 @@ def refine_rt(honkaiStart : HonkaiStart, vis_folder=None, single_image_refine=Fa
                 
         else:
             loss, visited = refine_rt_forward(optimizer=optimizer, iter_id=i)
-            optimizer.step()    
-            print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))   
+            optimizer.step()
+            print('raw_translation: {}, raw_quaternion: {}, loss: {}'.format(honkaiStart.raw_translation, honkaiStart.raw_quaternion, loss.norm()))
         if loss.norm() < 1e-6 and visited:
             print_info("REG finished with loss ", loss.norm)
             break
@@ -343,7 +433,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu) 
     honkaiStart = HonkaiStart(args.conf)    
-    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon_fricp"), single_image_refine=True, write_out=args.write_out)
+    refine_rt(honkaiStart=honkaiStart, vis_folder= Path("debug", "dragon_fricp"), single_image_refine=True, write_out=args.write_out, refine_mode="SDF")
 
 """
 python honkai_nerf.py --conf ./confs/json/march7th.json --gpu 1
